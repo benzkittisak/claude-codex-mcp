@@ -1,0 +1,6 @@
+[mcp_servers.codex-async]
+args = [
+    "-m",
+    "codex_async_mcp.server",
+]
+command = "python"
