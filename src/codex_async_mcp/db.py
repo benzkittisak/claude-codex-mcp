@@ -32,16 +32,23 @@ def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
 def init_db() -> None:
-    """Create table if it doesn't exist. Safe to call multiple times."""
+    """
+    Create schema and configure WAL mode.  Safe to call multiple times.
+
+    WAL mode is set here (once, on an exclusive connection) rather than on
+    every _get_conn() call so that concurrent reader connections don't race
+    on the PRAGMA and produce "database is locked" errors.
+    """
     with _write_lock:
         conn = _get_conn()
         try:
+            # WAL mode makes reads non-blocking; set it once at init time.
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (
                     job_id          TEXT PRIMARY KEY,

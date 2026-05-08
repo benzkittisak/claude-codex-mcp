@@ -6,7 +6,7 @@ from .job_manager import (
     cancel_job,
     get_queue_status,
     list_jobs,
-    poll_job,
+    notify_job_done,
     recover_on_startup,
     start_job,
     wait_for_job,
@@ -41,20 +41,6 @@ def codex_start(prompt: str, cwd: str, approval_policy: str = "full-auto") -> di
     return start_job(prompt, cwd, approval_policy)
 
 
-@mcp.tool()
-def codex_poll(job_id: str, tail_lines: int = 100) -> dict:
-    """
-    Non-blocking status snapshot for a codex job (backward-compat).
-
-    Prefer codex_wait() for new workflows — it returns immediately when done
-    without requiring repeated calls.
-
-    Args:
-        job_id: The job_id returned by codex_start.
-        tail_lines: Trailing lines of output to return. Default: 100.
-    """
-    return poll_job(job_id, tail_lines)
-
 
 @mcp.tool()
 def codex_list(limit: int = 20) -> list:
@@ -84,27 +70,32 @@ def codex_cancel(job_id: str) -> dict:
 # ── New tools ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def codex_wait(job_id: str, timeout_seconds: float = 300) -> dict:
+def codex_wait(job_id: str, timeout_seconds: float = 10) -> dict:
     """
     Block until a codex job finishes, then return its full result.
 
-    This is the preferred way to wait for a job — it returns the moment
-    the job completes without any polling overhead.
-
     Returns immediately if the job is already done/error/cancelled.
-    If the job exceeds timeout_seconds, returns {"status": "timeout"} and
-    you can call codex_wait() again to keep waiting.
+    If the job is still running after timeout_seconds, returns
+    {"status": "timeout", "output": "<latest output so far>"} — call
+    codex_wait() again to keep waiting and get the next progress snapshot.
+
+    IMPORTANT: Keep timeout_seconds at 10 (default). Claude Code drops MCP
+    connections that block longer than ~60 s, so short timeouts are required.
+    Claude should loop: call codex_wait repeatedly until status != "timeout".
 
     Recommended workflow:
         job = codex_start(prompt, cwd, "full-auto")
-        result = codex_wait(job["job_id"])        # blocks here
-        # result.status == "done" → inspect result.output, decide next step
+        while True:
+            result = codex_wait(job["job_id"])   # returns in ≤10 s
+            if result["status"] != "timeout":
+                break
+            # log result["output"] to show progress, then loop
 
     Args:
         job_id: The job_id returned by codex_start.
-        timeout_seconds: Max seconds to block. Default: 300 (5 min).
+        timeout_seconds: Max seconds to block per call. Default: 10.
     """
-    return                (job_id, timeout_seconds)
+    return wait_for_job(job_id, timeout_seconds)
 
 
 @mcp.tool()
@@ -135,6 +126,22 @@ def codex_queue_status() -> dict:
     or to check on progress without blocking.
     """
     return get_queue_status()
+
+
+@mcp.tool()
+def codex_notify_done(job_id: str, summary: str = "") -> dict:
+    """
+    Called BY CODEX to signal that it has finished its task.
+
+    This immediately unblocks any codex_wait() call in Claude without waiting
+    for the Codex process to exit.  Codex should call this at the very end of
+    every task it receives via codex_start.
+
+    Args:
+        job_id:  The job_id embedded in the task prompt by codex_start.
+        summary: One-sentence description of what was done (appended to output).
+    """
+    return notify_job_done(job_id, summary)
 
 
 def main():

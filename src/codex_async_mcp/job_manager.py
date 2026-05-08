@@ -39,6 +39,8 @@ from .config import (
     JOBS_DIR,
     JOB_TAIL_LINES,
     MAX_OUTPUT_CHARS,
+    MONITOR_POLL_INTERVAL,
+    OUTPUT_STALL_TIMEOUT,
 )
 from .db import (
     db_count_status,
@@ -127,25 +129,79 @@ def _notify_completion(job_id: str) -> None:
 
 
 def _monitor(job_id: str, proc: subprocess.Popen) -> None:
-    """Background thread: wait for Popen → update DB/meta → advance queue."""
-    exit_code = proc.wait()
-    status = "done" if exit_code == 0 else "error"
+    """
+    Background thread: wait for Popen to exit, then update DB and advance queue.
+
+    Stall detection
+    ───────────────
+    Codex sometimes finishes its task (printing a completion summary) but
+    doesn't exit — e.g. because a child process it spawned (docker-exec, etc.)
+    is still running or because it hangs on cleanup.
+
+    Every MONITOR_POLL_INTERVAL seconds we check whether the output file has
+    grown.  If OUTPUT_STALL_TIMEOUT elapses with no new output bytes, we
+    SIGTERM the process and treat the job as done.  This unblocks codex_wait()
+    without waiting forever.
+    """
+    output_path = _job_dir(job_id) / "output.txt"
+    last_size: int = output_path.stat().st_size if output_path.exists() else 0
+    last_growth_time: float = time.time()
+    exit_code: int = 0
+
+    while True:
+        try:
+            exit_code = proc.wait(timeout=MONITOR_POLL_INTERVAL)
+            break  # process exited normally
+        except subprocess.TimeoutExpired:
+            pass   # still running — check stall below
+
+        # Check output file growth
+        try:
+            current_size = output_path.stat().st_size if output_path.exists() else 0
+        except OSError:
+            current_size = last_size
+
+        if current_size > last_size:
+            last_size = current_size
+            last_growth_time = time.time()
+        elif time.time() - last_growth_time >= OUTPUT_STALL_TIMEOUT:
+            # Output stalled → Codex is done but not exiting; kill it.
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except (subprocess.TimeoutExpired, ProcessLookupError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            exit_code = proc.returncode or 0
+            break
+
     now = datetime.now(timezone.utc).isoformat()
 
     try:
-        db_update_job(job_id, status=status, exit_code=exit_code, finished_at=now)
-        _patch_meta(job_id, status=status, exit_code=exit_code, finished_at=now)
+        # Check if Codex already called codex_notify_done() — if so, the job
+        # is already "done" in the DB and Claude has already been unblocked.
+        # We only update the DB / notify if the job is still marked "running".
+        job = db_get_job(job_id)
+        already_notified = job is not None and job["status"] != "running"
+
+        if not already_notified:
+            status = "done" if exit_code == 0 else "error"
+            db_update_job(job_id, status=status, exit_code=exit_code, finished_at=now)
+            _patch_meta(job_id, status=status, exit_code=exit_code, finished_at=now)
 
         with _lock:
             _active_procs.pop(job_id, None)
             _try_start_next_locked()    # advance queue before releasing lock
     except Exception:
         # DB might be unavailable (e.g. during tests when the path is swapped).
-        # Still notify waiters so codex_wait() / await_any_completion() unblock.
         with _lock:
             _active_procs.pop(job_id, None)
+        already_notified = False
 
-    _notify_completion(job_id)
+    if not already_notified:
+        _notify_completion(job_id)
 
 
 def _pid_watcher(job_id: str, pid: int, event: threading.Event) -> None:
@@ -187,7 +243,19 @@ def _spawn_locked(job: dict) -> None:
     output_path = job_dir / "output.txt"
 
     flags = _APPROVAL_FLAGS.get(approval_policy, ["--full-auto"])
-    cmd = [CODEX_BIN, "exec"] + flags + [prompt]
+
+    # Append job_id instruction so Codex can call codex_notify_done() when done.
+    # This gives Claude an immediate callback instead of waiting for process exit.
+    full_prompt = (
+        f"{prompt}\n\n"
+        f"---\n"
+        f"When you have fully completed the task above, call the MCP tool "
+        f"`codex_notify_done` with:\n"
+        f"  job_id  = \"{job_id}\"\n"
+        f"  summary = one-sentence description of what was done\n"
+        f"This signals Claude that you are done so it can continue immediately."
+    )
+    cmd = [CODEX_BIN, "exec"] + flags + [full_prompt]
     now = datetime.now(timezone.utc).isoformat()
 
     with open(output_path, "w") as out_f:
@@ -330,6 +398,7 @@ def wait_for_job(job_id: str, timeout_seconds: float = 300) -> dict:
                 f"Job still running after {timeout_seconds}s. "
                 "Call codex_wait() again to continue waiting."
             ),
+            "output": _read_tail(job_id),   # current output so far
         }
 
     job = db_get_job(job_id)
@@ -404,6 +473,57 @@ def get_queue_status() -> dict:
             }
             for j in recent_done
         ],
+    }
+
+
+def notify_job_done(job_id: str, summary: str = "") -> dict:
+    """
+    Called by Codex (via the codex_notify_done MCP tool) to signal task completion.
+
+    Immediately unblocks codex_wait() without waiting for the process to exit.
+    The stall-detection logic in _monitor serves as a fallback if this is never called
+    (e.g. because Codex crashed before reaching the end of its task).
+
+    If *summary* is provided it is appended to the job's output file so Claude
+    can read it in the poll / wait result.
+    """
+    job = db_get_job(job_id)
+    if job is None:
+        return {"error": f"Job '{job_id}' not found"}
+
+    if job["status"] != "running":
+        # Already finished (race with _monitor, or duplicate call) — no-op.
+        return {
+            "job_id": job_id,
+            "status": job["status"],
+            "message": "Job already finished — no action taken",
+        }
+
+    # Append summary to the output file so it's visible in the poll result.
+    if summary:
+        output_path = _job_dir(job_id) / "output.txt"
+        try:
+            with open(output_path, "a") as f:
+                f.write(f"\n[codex_notify_done] {summary}\n")
+        except OSError:
+            pass
+
+    now = datetime.now(timezone.utc).isoformat()
+    db_update_job(job_id, status="done", exit_code=0, finished_at=now)
+    _patch_meta(job_id, status="done", exit_code=0, finished_at=now)
+
+    # Remove from active procs and start the next queued job.
+    with _lock:
+        _active_procs.pop(job_id, None)
+        _try_start_next_locked()
+
+    # Unblock any codex_wait() / codex_await_any() calls.
+    _notify_completion(job_id)
+
+    return {
+        "job_id": job_id,
+        "status": "done",
+        "message": "Claude notified — continuing immediately",
     }
 
 
