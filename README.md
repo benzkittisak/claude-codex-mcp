@@ -65,6 +65,35 @@ claude mcp list
 
 ---
 
+## Register with Cursor IDE
+
+If you want to use this MCP server directly from within the Cursor Editor's AI Chat (Composer):
+
+### Option 1: Via Settings UI
+1. Open Cursor Settings (`Ctrl/Cmd + ,`)
+2. Go to **Features** > **MCP**
+3. Click **+ Add new MCP Server**
+4. Set the following values:
+   - **Type**: `command`
+   - **Name**: `codex-async`
+   - **Command**: `python -m codex_async_mcp.server`
+
+### Option 2: Via `.cursor/mcp.json`
+Create or edit `.cursor/mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "codex-async": {
+      "command": "python",
+      "args": ["-m", "codex_async_mcp.server"]
+    }
+  }
+}
+```
+
+---
+
 ## Tools
 
 | Tool | Description |
