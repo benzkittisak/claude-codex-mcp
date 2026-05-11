@@ -12,6 +12,7 @@ Schema (queue.db / jobs table):
   created_at      TEXT  — ISO-8601 UTC
   started_at      TEXT  (nullable)
   finished_at     TEXT  (nullable)
+  agent_type      TEXT  — codex | cursor
 """
 
 import sqlite3
@@ -71,9 +72,17 @@ def init_db() -> None:
                     exit_code       INTEGER,
                     created_at      TEXT NOT NULL,
                     started_at      TEXT,
-                    finished_at     TEXT
+                    finished_at     TEXT,
+                    agent_type      TEXT NOT NULL DEFAULT 'codex'
                 )
             """)
+            
+            # Migration for existing databases
+            try:
+                conn.execute("ALTER TABLE jobs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'codex'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+                
             # Composite index speeds up the most frequent queries:
             # db_get_next_pending, db_get_running, db_count_status.
             conn.execute("""
@@ -113,14 +122,15 @@ def db_insert_job(
     cwd: str,
     approval_policy: str,
     created_at: str,
+    agent_type: str = "codex",
 ) -> None:
     with _write_lock:
         conn = _get_conn()
         conn.execute(
             """INSERT INTO jobs
-               (job_id, status, prompt, cwd, approval_policy, created_at)
-               VALUES (?, 'pending', ?, ?, ?, ?)""",
-            (job_id, prompt, cwd, approval_policy, created_at),
+               (job_id, status, prompt, cwd, approval_policy, created_at, agent_type)
+               VALUES (?, 'pending', ?, ?, ?, ?, ?)""",
+            (job_id, prompt, cwd, approval_policy, created_at, agent_type),
         )
         conn.commit()
 

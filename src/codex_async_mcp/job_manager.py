@@ -38,6 +38,7 @@ logger = logging.getLogger("codex-async-mcp")
 
 from .config import (
     CODEX_BIN,
+    CURSOR_BIN,
     DEFAULT_APPROVAL_POLICY,
     JOBS_DIR,
     JOB_TAIL_LINES,
@@ -263,6 +264,7 @@ def _spawn_locked(job: dict) -> None:
     prompt         = job["prompt"]
     cwd            = job["cwd"]
     approval_policy = job["approval_policy"]
+    agent_type     = job.get("agent_type", "codex")
 
     job_dir = _job_dir(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -281,17 +283,34 @@ def _spawn_locked(job: dict) -> None:
         f"  summary = one-sentence description of what was done\n"
         f"This signals Claude that you are done so it can continue immediately."
     )
-    cmd = [CODEX_BIN, "exec"] + flags + [full_prompt]
+    
+    if agent_type == "cursor":
+        if os.name == "nt":
+            cmd = ["wsl", "bash", "-lc", 'agent -p --force "$1"', "--", full_prompt]
+        else:
+            cmd = [CURSOR_BIN, "-p", "--force", full_prompt]
+    else:
+        cmd = [CODEX_BIN, "exec"] + flags + [full_prompt]
+        
     now = datetime.now(timezone.utc).isoformat()
 
-    with open(output_path, "w") as out_f:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=out_f,
-            stderr=subprocess.STDOUT,
-            cwd=cwd,
-        )
+    try:
+        with open(output_path, "w") as out_f:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=out_f,
+                stderr=subprocess.STDOUT,
+                cwd=cwd,
+            )
+    except FileNotFoundError:
+        logger.error("Executable not found: %s", cmd[0])
+        now = datetime.now(timezone.utc).isoformat()
+        db_update_job(job_id, status="error", exit_code=127, finished_at=now)
+        with open(output_path, "w") as out_f:
+            out_f.write(f"Error: command not found: {cmd[0]}\n")
+        _try_start_next_locked()
+        return
 
     db_update_job(job_id, status="running", pid=proc.pid, started_at=now)
     logger.info("Job %s spawned (pid=%d, cwd=%s)", job_id, proc.pid, cwd)
@@ -317,10 +336,53 @@ def _try_start_next_locked() -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def _inject_context(prompt: str, cwd: str, context_files: list[str] | None) -> str:
+    """Read context files and cursorrules, then prepend them to the prompt."""
+    context_blocks = []
+    
+    # Auto-detect rules
+    rules_paths = [Path(cwd) / ".cursorrules", Path(cwd) / ".cursor" / "rules"]
+    for path in rules_paths:
+        if path.is_file():
+            try:
+                content = path.read_text(encoding="utf-8")
+                context_blocks.append(f"--- PROJECT RULES ({path.name}) ---\n{content}\n")
+            except Exception as e:
+                logger.warning("Failed to read rules file %s: %s", path, e)
+        elif path.is_dir():
+            for rule_file in path.glob("*"):
+                if rule_file.is_file():
+                    try:
+                        content = rule_file.read_text(encoding="utf-8")
+                        context_blocks.append(f"--- RULE ({rule_file.name}) ---\n{content}\n")
+                    except Exception:
+                        pass
+    
+    # Inject user-provided context files
+    if context_files:
+        for file_path in context_files:
+            # Resolve relative to cwd if not absolute
+            path = Path(cwd) / file_path if not Path(file_path).is_absolute() else Path(file_path)
+            if path.is_file():
+                try:
+                    content = path.read_text(encoding="utf-8")
+                    context_blocks.append(f"--- FILE CONTEXT: {file_path} ---\n{content}\n")
+                except Exception as e:
+                    logger.warning("Failed to read context file %s: %s", file_path, e)
+            else:
+                context_blocks.append(f"--- FILE CONTEXT: {file_path} ---\n(File not found or is a directory)\n")
+
+    if context_blocks:
+        return "\n".join(context_blocks) + "\n\n=== TASK ===\n" + prompt
+    return prompt
+
+
 def start_job(
     prompt: str,
     cwd: str,
     approval_policy: str = DEFAULT_APPROVAL_POLICY,
+    agent_type: str = "codex",
+    context_files: list[str] | None = None,
 ) -> dict:
     """
     Enqueue a new job.
@@ -334,12 +396,15 @@ def start_job(
     if not Path(cwd).is_dir():
         return {"error": f"cwd does not exist or is not a directory: {cwd}"}
 
+    # Inject context into prompt
+    prompt = _inject_context(prompt, cwd, context_files)
+
     job_id = uuid.uuid4().hex[:8]
     now = datetime.now(timezone.utc).isoformat()
 
     # Write to DB (source of truth).
-    db_insert_job(job_id, prompt, cwd, approval_policy, now)
-    logger.info("Job %s enqueued (prompt=%.80s)", job_id, prompt)
+    db_insert_job(job_id, prompt, cwd, approval_policy, now, agent_type)
+    logger.info("Job %s enqueued (prompt=%.80s, agent_type=%s)", job_id, prompt, agent_type)
 
     # Create job directory for output.txt (no meta.json — DB is authoritative).
     job_dir = _job_dir(job_id)
@@ -575,6 +640,9 @@ def _build_result(job: dict) -> dict:
     # Codex's context limit is ~200k tokens. Flag if usage is high enough
     # that the output may have been cut short before the task was complete.
     possibly_truncated = token_usage is not None and token_usage >= 120_000
+    
+    agent_type = job.get("agent_type", "codex")
+    
     result = {
         "job_id":      job_id,
         "status":      job["status"],
@@ -586,13 +654,21 @@ def _build_result(job: dict) -> dict:
         "finished_at": job.get("finished_at"),
         "token_usage": token_usage,
     }
+    
     if possibly_truncated:
         result["possibly_truncated"] = True
         result["truncation_warning"] = (
-            f"Codex used {token_usage:,} tokens — output may be incomplete. "
+            f"Agent used {token_usage:,} tokens — output may be incomplete. "
             "Read the output carefully, check what was NOT done, and resume "
-            "with a follow-up codex_start if needed."
+            "with a follow-up task if needed."
         )
+        
+    if agent_type == "cursor" and job["status"] == "error":
+        if "Authentication required" in output:
+            result["error_hint"] = "Cursor CLI requires authentication. Run 'agent login' in the terminal or set the CURSOR_API_KEY environment variable."
+        elif "command not found" in output:
+            result["error_hint"] = "Cursor CLI (agent) is not installed or not in PATH."
+            
     return result
 
 

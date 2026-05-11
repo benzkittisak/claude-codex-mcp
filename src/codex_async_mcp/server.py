@@ -22,23 +22,28 @@ mcp = FastMCP("codex-async-mcp")
 # ── Existing tools (unchanged API) ────────────────────────────────────────────
 
 @mcp.tool()
-def codex_start(prompt: str, cwd: str, approval_policy: str = "full-auto") -> dict:
+def codex_start(
+    prompt: str,
+    cwd: str,
+    approval_policy: str = "full-auto",
+    context_files: list[str] | None = None
+) -> dict:
     """
-    Queue a codex task and start it immediately (or enqueue it if another job is running).
-
-    Returns a job_id instantly — never blocks or times out.
-    The queue is sequential: only one Codex process runs at a time.
-    When the current job finishes, the next pending job starts automatically.
-
-    Use codex_wait(job_id) — NOT codex_poll — to be notified when the job finishes.
+    Queue a codex task and start it immediately.
+    
+    ROUTING LOGIC - WHEN TO USE CODEX:
+    - Best for: Quick, targeted, single-file edits, bug fixes, or boilerplate generation.
+    - Speed: Very fast. Use when you know exactly what needs to be changed.
+    
+    Returns a job_id instantly. Use codex_wait(job_id) to wait for completion.
 
     Args:
         prompt: The task description to pass to codex.
         cwd: Absolute path to the working directory for codex.
         approval_policy: One of 'suggest', 'auto-edit', 'full-auto'. Default: 'full-auto'.
-                         Always use 'full-auto' for autonomous Claude→Codex workflows.
+        context_files: Optional list of relative/absolute file paths to inject into the prompt.
     """
-    return start_job(prompt, cwd, approval_policy)
+    return start_job(prompt, cwd, approval_policy, "codex", context_files)
 
 
 
@@ -65,6 +70,56 @@ def codex_cancel(job_id: str) -> dict:
         job_id: The job_id returned by codex_start.
     """
     return cancel_job(job_id)
+
+
+# ── Cursor Tools (Aliases) ────────────────────────────────────────────────────
+
+@mcp.tool()
+def cursor_start(
+    prompt: str,
+    cwd: str,
+    approval_policy: str = "full-auto",
+    context_files: list[str] | None = None
+) -> dict:
+    """
+    Queue a Cursor task using the headless agent and start it immediately.
+    
+    ROUTING LOGIC - WHEN TO USE CURSOR:
+    - Best for: Complex refactoring, multi-file changes, architectural design, 
+      and tasks requiring deep repository understanding.
+    - Context: Cursor has superior context-gathering capabilities and handles 
+      complex, ambiguous instructions better than Codex.
+    
+    Returns a job_id instantly. Use cursor_wait(job_id) to wait for completion.
+
+    Args:
+        prompt: The task description.
+        cwd: Absolute path to the working directory.
+        approval_policy: (Passed to backend, usually "full-auto")
+        context_files: Optional list of relative/absolute file paths to strictly 
+                       enforce as context. .cursorrules are injected automatically.
+    """
+    return start_job(prompt, cwd, approval_policy, agent_type="cursor", context_files=context_files)
+
+@mcp.tool()
+def cursor_wait(job_id: str, timeout_seconds: float = 10) -> dict:
+    """Block until a cursor job finishes."""
+    return wait_for_job(job_id, timeout_seconds)
+
+@mcp.tool()
+def cursor_list(limit: int = 20) -> list:
+    """List recent cursor/codex jobs."""
+    return list_jobs(limit)
+
+@mcp.tool()
+def cursor_cancel(job_id: str) -> dict:
+    """Cancel a running or pending cursor job."""
+    return cancel_job(job_id)
+
+@mcp.tool()
+def cursor_queue_status() -> dict:
+    """Return a snapshot of the shared job queue."""
+    return get_queue_status()
 
 
 # ── New tools ─────────────────────────────────────────────────────────────────
