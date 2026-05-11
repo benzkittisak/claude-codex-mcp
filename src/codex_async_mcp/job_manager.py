@@ -17,13 +17,12 @@ Key design decisions
     – spawns a lightweight PID-watcher thread that watches the process until
       it exits, then resolves it.
 
-• Backward compat  — start_job / poll_job / list_jobs / cancel_job keep
-  their original signatures and file-based meta.json/output.txt storage.
+• SQLite is the single source of truth — meta.json removed; output.txt
+  remains for streaming Codex stdout.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import threading
@@ -38,6 +37,7 @@ from .config import (
     DEFAULT_APPROVAL_POLICY,
     JOBS_DIR,
     JOB_TAIL_LINES,
+    MAX_JOB_DURATION,
     MAX_OUTPUT_CHARS,
     MONITOR_POLL_INTERVAL,
     OUTPUT_STALL_TIMEOUT,
@@ -69,28 +69,10 @@ _any_completion = threading.Condition()
 _last_completed_id: list[Optional[str]] = [None]   # mutable singleton
 
 
-# ── File-based storage (backward compat) ─────────────────────────────────────
+# ── File-based storage ───────────────────────────────────────────────────────
 
 def _job_dir(job_id: str) -> Path:
     return JOBS_DIR / job_id
-
-
-def _write_meta(job_id: str, data: dict) -> None:
-    path = _job_dir(job_id) / "meta.json"
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _patch_meta(job_id: str, **kwargs) -> None:
-    """Update specific keys in meta.json without overwriting the whole file."""
-    path = _job_dir(job_id) / "meta.json"
-    if not path.exists():
-        return
-    with open(path) as f:
-        meta = json.load(f)
-    meta.update(kwargs)
-    with open(path, "w") as f:
-        json.dump(meta, f, indent=2)
 
 
 def _read_tail(job_id: str, tail_lines: int = JOB_TAIL_LINES) -> str:
@@ -105,6 +87,23 @@ def _read_tail(job_id: str, tail_lines: int = JOB_TAIL_LINES) -> str:
     return tail
 
 
+def _parse_token_usage(job_id: str) -> Optional[int]:
+    """Parse 'tokens used\\nX' from Codex output. Returns None if not found."""
+    output_path = _job_dir(job_id) / "output.txt"
+    if not output_path.exists():
+        return None
+    try:
+        text = output_path.read_text(errors="replace")
+        # Codex prints: "tokens used\n117,792" (with comma) or "117792"
+        import re
+        m = re.search(r"tokens used\s*\n\s*([\d,]+)", text, re.IGNORECASE)
+        if m:
+            return int(m.group(1).replace(",", ""))
+    except OSError:
+        pass
+    return None
+
+
 def _is_pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -116,9 +115,9 @@ def _is_pid_alive(pid: int) -> bool:
 # ── Internal queue machinery ──────────────────────────────────────────────────
 
 def _notify_completion(job_id: str) -> None:
-    """Signal per-job event and the global any-completion condition."""
+    """Signal per-job event, clean it up, and notify the global condition."""
     with _lock:
-        event = _completion_events.get(job_id)
+        event = _completion_events.pop(job_id, None)  # pop = set + cleanup in one step
 
     if event:
         event.set()
@@ -146,6 +145,7 @@ def _monitor(job_id: str, proc: subprocess.Popen) -> None:
     output_path = _job_dir(job_id) / "output.txt"
     last_size: int = output_path.stat().st_size if output_path.exists() else 0
     last_growth_time: float = time.time()
+    job_start_time: float = time.time()
     exit_code: int = 0
 
     while True:
@@ -153,9 +153,22 @@ def _monitor(job_id: str, proc: subprocess.Popen) -> None:
             exit_code = proc.wait(timeout=MONITOR_POLL_INTERVAL)
             break  # process exited normally
         except subprocess.TimeoutExpired:
-            pass   # still running — check stall below
+            pass   # still running — check stall and max-duration below
 
-        # Check output file growth
+        # Hard ceiling: kill if job has run longer than MAX_JOB_DURATION
+        if time.time() - job_start_time >= MAX_JOB_DURATION:
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except (subprocess.TimeoutExpired, ProcessLookupError):
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            exit_code = proc.returncode or 0
+            break
+
+        # Check output file growth (stall detection)
         try:
             current_size = output_path.stat().st_size if output_path.exists() else 0
         except OSError:
@@ -189,7 +202,6 @@ def _monitor(job_id: str, proc: subprocess.Popen) -> None:
         if not already_notified:
             status = "done" if exit_code == 0 else "error"
             db_update_job(job_id, status=status, exit_code=exit_code, finished_at=now)
-            _patch_meta(job_id, status=status, exit_code=exit_code, finished_at=now)
 
         with _lock:
             _active_procs.pop(job_id, None)
@@ -216,7 +228,6 @@ def _pid_watcher(job_id: str, pid: int, event: threading.Event) -> None:
     job = db_get_job(job_id)
     if job and job["status"] == "running":
         db_update_job(job_id, status="done", finished_at=now)
-        _patch_meta(job_id, status="done", finished_at=now)
 
     with _lock:
         _active_procs.pop(job_id, None)
@@ -268,7 +279,6 @@ def _spawn_locked(job: dict) -> None:
         )
 
     db_update_job(job_id, status="running", pid=proc.pid, started_at=now)
-    _patch_meta(job_id, status="running", pid=proc.pid, started_at=now)
 
     _active_procs[job_id] = proc
     if job_id not in _completion_events:
@@ -304,26 +314,19 @@ def start_job(
 
     Returns immediately with job_id — does NOT block.
     """
+    # Validate cwd before touching the DB.
+    if not Path(cwd).is_dir():
+        return {"error": f"cwd does not exist or is not a directory: {cwd}"}
+
     job_id = uuid.uuid4().hex[:8]
     now = datetime.now(timezone.utc).isoformat()
 
-    # Write to DB first (as pending).
+    # Write to DB (source of truth).
     db_insert_job(job_id, prompt, cwd, approval_policy, now)
 
-    # Write legacy meta.json.
+    # Create job directory for output.txt (no meta.json — DB is authoritative).
     job_dir = _job_dir(job_id)
     job_dir.mkdir(parents=True, exist_ok=True)
-    _write_meta(job_id, {
-        "job_id": job_id,
-        "status": "pending",
-        "prompt": prompt,
-        "cwd": cwd,
-        "approval_policy": approval_policy,
-        "pid": None,
-        "started_at": None,
-        "finished_at": None,
-        "exit_code": None,
-    })
 
     with _lock:
         _completion_events[job_id] = threading.Event()
@@ -385,7 +388,6 @@ def wait_for_job(job_id: str, timeout_seconds: float = 300) -> dict:
                     # PID already dead — resolve immediately.
                     now = datetime.now(timezone.utc).isoformat()
                     db_update_job(job_id, status="done", finished_at=now)
-                    _patch_meta(job_id, status="done", finished_at=now)
                     event.set()
             # If still pending: event will be set by _monitor when the job runs.
 
@@ -510,7 +512,6 @@ def notify_job_done(job_id: str, summary: str = "") -> dict:
 
     now = datetime.now(timezone.utc).isoformat()
     db_update_job(job_id, status="done", exit_code=0, finished_at=now)
-    _patch_meta(job_id, status="done", exit_code=0, finished_at=now)
 
     # Remove from active procs and start the next queued job.
     with _lock:
@@ -540,7 +541,6 @@ def recover_on_startup() -> None:
         if pid and not _is_pid_alive(pid):
             now = datetime.now(timezone.utc).isoformat()
             db_update_job(running["job_id"], status="error", finished_at=now)
-            _patch_meta(running["job_id"], status="error", finished_at=now)
 
     with _lock:
         _try_start_next_locked()
@@ -549,16 +549,30 @@ def recover_on_startup() -> None:
 # ── Backward-compatible helpers ───────────────────────────────────────────────
 
 def _build_result(job: dict) -> dict:
-    return {
-        "job_id":      job["job_id"],
+    job_id = job["job_id"]
+    token_usage = _parse_token_usage(job_id)
+    # Codex's context limit is ~200k tokens. Flag if usage is high enough
+    # that the output may have been cut short before the task was complete.
+    possibly_truncated = token_usage is not None and token_usage >= 120_000
+    result = {
+        "job_id":      job_id,
         "status":      job["status"],
         "exit_code":   job.get("exit_code"),
-        "output":      _read_tail(job["job_id"]),
+        "output":      _read_tail(job_id),
         "prompt":      job["prompt"],
         "cwd":         job["cwd"],
         "started_at":  job.get("started_at"),
         "finished_at": job.get("finished_at"),
+        "token_usage": token_usage,
     }
+    if possibly_truncated:
+        result["possibly_truncated"] = True
+        result["truncation_warning"] = (
+            f"Codex used {token_usage:,} tokens — output may be incomplete. "
+            "Read the output carefully, check what was NOT done, and resume "
+            "with a follow-up codex_start if needed."
+        )
+    return result
 
 
 def poll_job(job_id: str, tail_lines: int = JOB_TAIL_LINES) -> dict:
@@ -575,7 +589,6 @@ def poll_job(job_id: str, tail_lines: int = JOB_TAIL_LINES) -> dict:
             if pid and not _is_pid_alive(pid):
                 now = datetime.now(timezone.utc).isoformat()
                 db_update_job(job_id, status="done", finished_at=now)
-                _patch_meta(job_id, status="done", finished_at=now)
                 job = db_get_job(job_id)
 
     output = _read_tail(job_id, tail_lines)
@@ -616,7 +629,6 @@ def cancel_job(job_id: str) -> dict:
     if status == "pending":
         now = datetime.now(timezone.utc).isoformat()
         db_update_job(job_id, status="cancelled", finished_at=now)
-        _patch_meta(job_id, status="cancelled", finished_at=now)
         _notify_completion(job_id)
         return {"job_id": job_id, "status": "cancelled", "message": "Removed from queue"}
 
@@ -638,7 +650,6 @@ def cancel_job(job_id: str) -> dict:
 
     now = datetime.now(timezone.utc).isoformat()
     db_update_job(job_id, status="cancelled", finished_at=now)
-    _patch_meta(job_id, status="cancelled", finished_at=now)
 
     with _lock:
         _active_procs.pop(job_id, None)

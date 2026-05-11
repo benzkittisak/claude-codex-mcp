@@ -14,3 +14,6 @@ MAX_OUTPUT_CHARS = 8000
 OUTPUT_STALL_TIMEOUT = 60   # seconds
 # How often the monitor wakes up to check for stall (also proc.wait timeout).
 MONITOR_POLL_INTERVAL = 5   # seconds
+# Hard ceiling on how long any single job may run regardless of output activity.
+# Prevents runaway jobs when Codex keeps writing output but never finishes.
+MAX_JOB_DURATION = 1800     # seconds (30 minutes)

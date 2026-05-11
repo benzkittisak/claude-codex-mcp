@@ -64,13 +64,13 @@ def test_start_job_creates_files(tmp_path):
     job_id = result["job_id"]
     assert len(job_id) == 8
 
+    # meta.json removed — DB is now the single source of truth.
     job_dir = tmp_path / job_id
-    assert (job_dir / "meta.json").exists()
     assert (job_dir / "output.txt").exists()
 
-    meta = json.loads((job_dir / "meta.json").read_text())
-    assert meta["job_id"] == job_id
-    assert meta["prompt"] == "hello world"
+    job = db_mod.db_get_job(job_id)
+    assert job["job_id"] == job_id
+    assert job["prompt"] == "hello world"
 
 
 def test_start_job_is_inserted_into_db(tmp_path):
@@ -109,11 +109,6 @@ def test_second_job_is_queued_while_first_runs(tmp_path):
     job_dir_1 = tmp_path / job_id_1
     job_dir_1.mkdir()
     (job_dir_1 / "output.txt").write_text("")
-    jm._write_meta(job_id_1, {
-        "job_id": job_id_1, "status": "running", "prompt": "sleep",
-        "cwd": str(tmp_path), "approval_policy": "full-auto",
-        "pid": None, "started_at": None, "finished_at": None, "exit_code": None,
-    })
     db_mod.db_insert_job(job_id_1, "sleep 10", str(tmp_path), "full-auto",
                          "2026-01-01T00:00:00+00:00")
     db_mod.db_update_job(job_id_1, status="running")
@@ -186,11 +181,6 @@ def test_wait_timeout_returns_timeout_status(tmp_path):
     job_dir = tmp_path / job_id
     job_dir.mkdir()
     (job_dir / "output.txt").write_text("")
-    jm._write_meta(job_id, {
-        "job_id": job_id, "status": "running", "prompt": "slow",
-        "cwd": str(tmp_path), "approval_policy": "full-auto",
-        "pid": None, "started_at": None, "finished_at": None, "exit_code": None,
-    })
     db_mod.db_insert_job(job_id, "slow job", str(tmp_path), "full-auto",
                          "2026-01-01T00:00:00+00:00")
     db_mod.db_update_job(job_id, status="running")
@@ -261,11 +251,6 @@ def test_cancel_pending_job(tmp_path):
     sentinel_dir = tmp_path / sentinel_id
     sentinel_dir.mkdir()
     (sentinel_dir / "output.txt").write_text("")
-    jm._write_meta(sentinel_id, {
-        "job_id": sentinel_id, "status": "running", "prompt": "sentinel",
-        "cwd": str(tmp_path), "approval_policy": "full-auto",
-        "pid": None, "started_at": None, "finished_at": None, "exit_code": None,
-    })
     db_mod.db_insert_job(sentinel_id, "sentinel", str(tmp_path), "full-auto",
                          "2026-01-01T00:00:00+00:00")
     db_mod.db_update_job(sentinel_id, status="running")
@@ -295,11 +280,6 @@ def test_cancel_advances_queue(tmp_path):
     first_dir = tmp_path / first_id
     first_dir.mkdir()
     (first_dir / "output.txt").write_text("")
-    jm._write_meta(first_id, {
-        "job_id": first_id, "status": "running", "prompt": "first",
-        "cwd": str(tmp_path), "approval_policy": "full-auto",
-        "pid": None, "started_at": None, "finished_at": None, "exit_code": None,
-    })
     db_mod.db_insert_job(first_id, "first", str(tmp_path), "full-auto",
                          "2026-01-01T00:00:00+00:00")
     db_mod.db_update_job(first_id, status="running")
