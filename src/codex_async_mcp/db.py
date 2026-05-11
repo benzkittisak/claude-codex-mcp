@@ -23,16 +23,24 @@ from .config import DB_PATH
 # SQLite is thread-safe in WAL mode; we serialise writes with a lock for clarity.
 _write_lock = threading.Lock()
 
+# Thread-local connection pool — avoids opening/closing a connection per query.
+_local = threading.local()
+
 
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
 
 def _get_conn() -> sqlite3.Connection:
+    """Return a thread-local cached connection (or create one)."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        return conn
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    _local.conn = conn
     return conn
 
 
@@ -45,7 +53,10 @@ def init_db() -> None:
     on the PRAGMA and produce "database is locked" errors.
     """
     with _write_lock:
-        conn = _get_conn()
+        # Use a fresh, direct connection — not the cached one — because
+        # init_db() closes the connection after setup.
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         try:
             # WAL mode makes reads non-blocking; set it once at init time.
             conn.execute("PRAGMA journal_mode=WAL")
@@ -63,9 +74,33 @@ def init_db() -> None:
                     finished_at     TEXT
                 )
             """)
+            # Composite index speeds up the most frequent queries:
+            # db_get_next_pending, db_get_running, db_count_status.
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_jobs_status_created
+                ON jobs (status, created_at)
+            """)
             conn.commit()
         finally:
             conn.close()
+
+    # Invalidate any cached connection on this thread (it may point to
+    # a previous DB_PATH, e.g. when tests swap the path between runs).
+    _local.conn = None
+
+
+def reset_pool() -> None:
+    """Invalidate the thread-local cached connection.
+
+    Called by tests when DB_PATH is monkeypatched to a fresh tmp file.
+    """
+    old = getattr(_local, "conn", None)
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+    _local.conn = None
 
 
 # ---------------------------------------------------------------------------
@@ -81,16 +116,13 @@ def db_insert_job(
 ) -> None:
     with _write_lock:
         conn = _get_conn()
-        try:
-            conn.execute(
-                """INSERT INTO jobs
-                   (job_id, status, prompt, cwd, approval_policy, created_at)
-                   VALUES (?, 'pending', ?, ?, ?, ?)""",
-                (job_id, prompt, cwd, approval_policy, created_at),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute(
+            """INSERT INTO jobs
+               (job_id, status, prompt, cwd, approval_policy, created_at)
+               VALUES (?, 'pending', ?, ?, ?, ?)""",
+            (job_id, prompt, cwd, approval_policy, created_at),
+        )
+        conn.commit()
 
 
 def db_update_job(job_id: str, **kwargs) -> None:
@@ -101,11 +133,8 @@ def db_update_job(job_id: str, **kwargs) -> None:
     values = list(kwargs.values()) + [job_id]
     with _write_lock:
         conn = _get_conn()
-        try:
-            conn.execute(f"UPDATE jobs SET {set_clause} WHERE job_id = ?", values)
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute(f"UPDATE jobs SET {set_clause} WHERE job_id = ?", values)
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -114,56 +143,41 @@ def db_update_job(job_id: str, **kwargs) -> None:
 
 def db_get_job(job_id: str) -> Optional[dict]:
     conn = _get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def db_get_next_pending() -> Optional[dict]:
     """Return the oldest pending job (FIFO), or None."""
     conn = _get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def db_get_running() -> Optional[dict]:
     """Return the currently running job, or None."""
     conn = _get_conn()
-    try:
-        row = conn.execute(
-            "SELECT * FROM jobs WHERE status = 'running' LIMIT 1"
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE status = 'running' LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def db_list_jobs(limit: int = 20) -> list[dict]:
     """Return jobs ordered newest-first."""
     conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+    rows = conn.execute(
+        "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def db_count_status(status: str) -> int:
     conn = _get_conn()
-    try:
-        return conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE status = ?", (status,)
-        ).fetchone()[0]
-    finally:
-        conn.close()
+    return conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status = ?", (status,)
+    ).fetchone()[0]

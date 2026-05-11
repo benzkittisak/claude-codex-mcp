@@ -45,6 +45,9 @@ def isolated_env(tmp_path, monkeypatch):
     # Redirect _job_dir helper
     monkeypatch.setattr(jm, "_job_dir", lambda job_id: tmp_path / job_id)
 
+    # Invalidate any cached DB connections from previous tests.
+    db_mod.reset_pool()
+
     # Re-initialise SQLite schema on the fresh DB file
     db_mod.init_db()
 
@@ -54,6 +57,9 @@ def isolated_env(tmp_path, monkeypatch):
     jm._last_completed_id[0] = None
 
     yield
+
+    # Clean up cached connections on teardown.
+    db_mod.reset_pool()
 
 
 # ── Basic job lifecycle ───────────────────────────────────────────────────────

@@ -99,15 +99,19 @@ def codex_wait(job_id: str, timeout_seconds: float = 10) -> dict:
 
 
 @mcp.tool()
-def codex_await_any(timeout_seconds: float = 300) -> dict:
+def codex_await_any(timeout_seconds: float = 10) -> dict:
     """
     Block until any queued or running job completes, then return its result.
 
     Useful when you have queued several jobs and want to process each result
     as it arrives without tracking individual job_ids.
 
+    IMPORTANT: Keep timeout_seconds at 10 (default). Claude Code drops MCP
+    connections that block longer than ~60 s, so short timeouts are required.
+    Claude should loop: call codex_await_any repeatedly until a result arrives.
+
     Args:
-        timeout_seconds: Max seconds to block. Default: 300 (5 min).
+        timeout_seconds: Max seconds to block per call. Default: 10.
     """
     return await_any_completion(timeout_seconds)
 

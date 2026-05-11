@@ -23,7 +23,9 @@ Key design decisions
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -31,6 +33,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("codex-async-mcp")
 
 from .config import (
     CODEX_BIN,
@@ -79,7 +83,17 @@ def _read_tail(job_id: str, tail_lines: int = JOB_TAIL_LINES) -> str:
     output_path = _job_dir(job_id) / "output.txt"
     if not output_path.exists():
         return ""
-    text = output_path.read_text(errors="replace")
+    # Seek from end to avoid reading multi-MB files entirely into memory.
+    max_bytes = MAX_OUTPUT_CHARS * 2  # generous estimate for tail
+    try:
+        size = output_path.stat().st_size
+    except OSError:
+        return ""
+    with open(output_path, "r", errors="replace") as f:
+        if size > max_bytes:
+            f.seek(size - max_bytes)
+            f.readline()  # discard partial line at the seek boundary
+        text = f.read()
     lines = text.splitlines()
     tail = "\n".join(lines[-tail_lines:])
     if len(tail) > MAX_OUTPUT_CHARS:
@@ -87,20 +101,14 @@ def _read_tail(job_id: str, tail_lines: int = JOB_TAIL_LINES) -> str:
     return tail
 
 
-def _parse_token_usage(job_id: str) -> Optional[int]:
-    """Parse 'tokens used\\nX' from Codex output. Returns None if not found."""
-    output_path = _job_dir(job_id) / "output.txt"
-    if not output_path.exists():
+def _parse_token_usage_from_text(text: str) -> Optional[int]:
+    """Parse 'tokens used\\nX' from Codex output text. Returns None if not found."""
+    if not text:
         return None
-    try:
-        text = output_path.read_text(errors="replace")
-        # Codex prints: "tokens used\n117,792" (with comma) or "117792"
-        import re
-        m = re.search(r"tokens used\s*\n\s*([\d,]+)", text, re.IGNORECASE)
-        if m:
-            return int(m.group(1).replace(",", ""))
-    except OSError:
-        pass
+    # Codex prints: "tokens used\n117,792" (with comma) or "117792"
+    m = re.search(r"tokens used\s*\n\s*([\d,]+)", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1).replace(",", ""))
     return None
 
 
@@ -157,6 +165,7 @@ def _monitor(job_id: str, proc: subprocess.Popen) -> None:
 
         # Hard ceiling: kill if job has run longer than MAX_JOB_DURATION
         if time.time() - job_start_time >= MAX_JOB_DURATION:
+            logger.warning("Job %s exceeded max duration (%ds), terminating", job_id, MAX_JOB_DURATION)
             try:
                 proc.terminate()
                 proc.wait(timeout=10)
@@ -179,6 +188,7 @@ def _monitor(job_id: str, proc: subprocess.Popen) -> None:
             last_growth_time = time.time()
         elif time.time() - last_growth_time >= OUTPUT_STALL_TIMEOUT:
             # Output stalled → Codex is done but not exiting; kill it.
+            logger.warning("Job %s output stalled for %ds, terminating", job_id, OUTPUT_STALL_TIMEOUT)
             try:
                 proc.terminate()
                 proc.wait(timeout=10)
@@ -201,11 +211,16 @@ def _monitor(job_id: str, proc: subprocess.Popen) -> None:
 
         if not already_notified:
             status = "done" if exit_code == 0 else "error"
+            elapsed = time.time() - job_start_time
+            logger.info("Job %s finished (status=%s, exit=%d, %.1fs)", job_id, status, exit_code, elapsed)
             db_update_job(job_id, status=status, exit_code=exit_code, finished_at=now)
-
-        with _lock:
-            _active_procs.pop(job_id, None)
-            _try_start_next_locked()    # advance queue before releasing lock
+            with _lock:
+                _active_procs.pop(job_id, None)
+                _try_start_next_locked()    # advance queue before releasing lock
+        else:
+            # notify_job_done() already advanced the queue — just clean up.
+            with _lock:
+                _active_procs.pop(job_id, None)
     except Exception:
         # DB might be unavailable (e.g. during tests when the path is swapped).
         with _lock:
@@ -279,6 +294,7 @@ def _spawn_locked(job: dict) -> None:
         )
 
     db_update_job(job_id, status="running", pid=proc.pid, started_at=now)
+    logger.info("Job %s spawned (pid=%d, cwd=%s)", job_id, proc.pid, cwd)
 
     _active_procs[job_id] = proc
     if job_id not in _completion_events:
@@ -323,6 +339,7 @@ def start_job(
 
     # Write to DB (source of truth).
     db_insert_job(job_id, prompt, cwd, approval_policy, now)
+    logger.info("Job %s enqueued (prompt=%.80s)", job_id, prompt)
 
     # Create job directory for output.txt (no meta.json — DB is authoritative).
     job_dir = _job_dir(job_id)
@@ -512,6 +529,7 @@ def notify_job_done(job_id: str, summary: str = "") -> dict:
 
     now = datetime.now(timezone.utc).isoformat()
     db_update_job(job_id, status="done", exit_code=0, finished_at=now)
+    logger.info("Job %s notify_done received (summary=%.80s)", job_id, summary)
 
     # Remove from active procs and start the next queued job.
     with _lock:
@@ -539,6 +557,7 @@ def recover_on_startup() -> None:
     if running:
         pid = running.get("pid")
         if pid and not _is_pid_alive(pid):
+            logger.warning("Recovering stale job %s (pid %d dead)", running["job_id"], pid)
             now = datetime.now(timezone.utc).isoformat()
             db_update_job(running["job_id"], status="error", finished_at=now)
 
@@ -550,7 +569,9 @@ def recover_on_startup() -> None:
 
 def _build_result(job: dict) -> dict:
     job_id = job["job_id"]
-    token_usage = _parse_token_usage(job_id)
+    output = _read_tail(job_id)
+    # Parse token usage from the already-read output (avoids reading the file twice).
+    token_usage = _parse_token_usage_from_text(output)
     # Codex's context limit is ~200k tokens. Flag if usage is high enough
     # that the output may have been cut short before the task was complete.
     possibly_truncated = token_usage is not None and token_usage >= 120_000
@@ -558,7 +579,7 @@ def _build_result(job: dict) -> dict:
         "job_id":      job_id,
         "status":      job["status"],
         "exit_code":   job.get("exit_code"),
-        "output":      _read_tail(job_id),
+        "output":      output,
         "prompt":      job["prompt"],
         "cwd":         job["cwd"],
         "started_at":  job.get("started_at"),
@@ -650,6 +671,7 @@ def cancel_job(job_id: str) -> dict:
 
     now = datetime.now(timezone.utc).isoformat()
     db_update_job(job_id, status="cancelled", finished_at=now)
+    logger.info("Job %s cancelled (killed=%s)", job_id, killed)
 
     with _lock:
         _active_procs.pop(job_id, None)

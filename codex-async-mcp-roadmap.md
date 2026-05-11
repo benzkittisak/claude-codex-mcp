@@ -11,7 +11,8 @@ forcing us to either keep tasks artificially small or bypass Codex entirely.
 Build a lightweight local MCP server that wraps the `codex` CLI asynchronously:
 
 - Accept a task → spawn `codex` as a background subprocess → return a `job_id` immediately (no blocking, no timeout)
-- A separate poll tool lets Claude check status and retrieve output when ready
+- A blocking-wait tool lets Claude be notified the moment a job finishes
+- A sequential queue ensures only one Codex process runs at a time
 
 ---
 
@@ -24,9 +25,13 @@ Claude (Cowork/Claude Code)
         ▼
 codex-async-mcp  (local Python server)
         │
-        ├── codex_start(prompt, cwd)  →  job_id  (instant)
-        ├── codex_poll(job_id)        →  status + output
-        └── codex_cancel(job_id)      →  (optional)
+        ├── codex_start(prompt, cwd)     →  job_id  (instant, queued)
+        ├── codex_wait(job_id)           →  blocks until done (≤10s per call)
+        ├── codex_await_any()            →  blocks until any job finishes
+        ├── codex_queue_status()         →  snapshot of running/pending/done
+        ├── codex_list(limit)            →  recent jobs
+        ├── codex_cancel(job_id)         →  kill running / remove pending
+        └── codex_notify_done(job_id)    →  callback from Codex when task done
         │
         │  subprocess.Popen
         ▼
@@ -35,46 +40,64 @@ codex CLI  (already installed on machine)
         └── writes stdout/stderr → ~/.codex-async/jobs/{job_id}/output.txt
 ```
 
-State per job stored in `~/.codex-async/jobs/{job_id}/meta.json`:
+State is stored in **SQLite** (`~/.codex-async/queue.db`) as the single source of truth.
+Per-job output is streamed to `~/.codex-async/jobs/{job_id}/output.txt`.
 
-```json
-{
-  "job_id": "abc123",
-  "status": "running | done | error",
-  "prompt": "...",
-  "cwd": "/path/to/repo",
-  "started_at": "2026-04-29T10:00:00",
-  "finished_at": null,
-  "exit_code": null
-}
-```
+### SQLite schema (jobs table)
+
+| Column | Type | Description |
+|---|---|---|
+| job_id | TEXT PK | 8-char hex UUID |
+| status | TEXT | pending / running / done / error / cancelled |
+| prompt | TEXT | Task description |
+| cwd | TEXT | Working directory |
+| approval_policy | TEXT | suggest / auto-edit / full-auto |
+| pid | INTEGER | OS process ID (nullable) |
+| exit_code | INTEGER | Process exit code (nullable) |
+| created_at | TEXT | ISO-8601 UTC |
+| started_at | TEXT | When process was spawned (nullable) |
+| finished_at | TEXT | When job reached terminal state (nullable) |
 
 ---
 
 ## Implementation Phases
 
-### Phase 1 — Core server (MVP)
+### Phase 1 — Core server (MVP) ✅
 
-- [ ] Bootstrap Python project with `fastmcp`
-- [ ] `codex_start(prompt, cwd, approval_policy?)` tool
-  - Spawns `codex --approval-mode <policy> "<prompt>"` via `subprocess.Popen`
+- [x] Bootstrap Python project with `fastmcp`
+- [x] `codex_start(prompt, cwd, approval_policy?)` tool
+  - Spawns `codex exec` via `subprocess.Popen`
   - Redirects stdout + stderr to `~/.codex-async/jobs/{job_id}/output.txt`
-  - Writes `meta.json` with status `running`
+  - Writes status to SQLite DB
   - Returns `job_id` immediately
-- [ ] `codex_poll(job_id)` tool
-  - Reads `meta.json` → check if subprocess PID is still alive
-  - If done: update status, capture exit code, return output tail
-  - If still running: return `{status: "running", output_so_far: "..."}`
-- [ ] Register with Claude via `claude mcp add`
+- [x] Blocking wait via `codex_wait(job_id)` with 10s timeout per call
+- [x] Register with Claude via `claude mcp add`
 
-### Phase 2 — Quality of life
+### Phase 2 — Queue & quality of life ✅
 
-- [ ] `codex_list()` — list recent jobs with status
-- [ ] `codex_cancel(job_id)` — kill subprocess + mark cancelled
-- [ ] Auto-cleanup of jobs older than N days
-- [ ] Output streaming (return last N lines of output while still running)
+- [x] Sequential job queue — only one Codex process at a time
+- [x] `codex_list()` — list recent jobs with status
+- [x] `codex_cancel(job_id)` — kill subprocess + mark cancelled + advance queue
+- [x] Output streaming (return last N lines of output while still running)
+- [x] `codex_queue_status()` — snapshot of running/pending/done
+- [x] `codex_await_any()` — block until any job completes
+- [x] `codex_notify_done(job_id)` — Codex callback for instant completion signal
+- [x] Stall detection — auto-SIGTERM after output stalls for 60s
+- [x] Max job duration ceiling (30 min)
+- [x] Server-restart recovery — detects dead PIDs and resumes queue
+- [x] Token usage parsing and truncation warnings
 
-### Phase 3 — Polish
+### Phase 3 — Optimization ✅
+
+- [x] Thread-local SQLite connection pooling
+- [x] Composite index on (status, created_at)
+- [x] Seek-from-end for large output files
+- [x] Avoid double file reads in result building
+- [x] Race condition fix between `notify_job_done()` and `_monitor()`
+- [x] Structured logging throughout job lifecycle
+- [ ] Auto-cleanup of old jobs (> 7 days)
+
+### Phase 4 — Polish (future)
 
 - [ ] Config file (`~/.codex-async/config.json`) for default `approval_policy`, `codex_path`
 - [ ] Web UI (optional) — simple HTML page to browse job history
@@ -89,7 +112,7 @@ State per job stored in `~/.codex-async/jobs/{job_id}/meta.json`:
 | Language | Python 3.11+ | fastmcp is Python-native, minimal boilerplate |
 | MCP framework | `fastmcp` | Simplest way to build MCP servers |
 | Process management | `subprocess.Popen` | Standard library, no extra deps |
-| State storage | JSON files | No DB needed, easy to inspect manually |
+| State storage | **SQLite (WAL mode)** | Atomic, concurrent-safe, single source of truth |
 | Install | `pip install -e .` + `claude mcp add` | Works with existing Claude Code setup |
 
 ---
@@ -103,27 +126,27 @@ codex-async-mcp/
 ├── src/
 │   └── codex_async_mcp/
 │       ├── __init__.py
-│       ├── server.py       # MCP server entry point
-│       ├── job_manager.py  # spawn / poll / cancel logic
-│       └── config.py       # paths, defaults
+│       ├── server.py       # MCP server entry point, tool definitions
+│       ├── job_manager.py  # spawn / wait / cancel / queue logic
+│       ├── db.py           # SQLite schema, CRUD operations
+│       └── config.py       # paths, timeouts, defaults
 └── tests/
     └── test_job_manager.py
 ```
 
 ---
 
-## Setup (after implementation)
+## Setup
 
 ```bash
 # 1. Clone / create project
-cd ~/projects
-git init codex-async-mcp && cd codex-async-mcp
+cd ~/payroll-mcp
 
 # 2. Install
 pip install -e ".[dev]"
 
 # 3. Register MCP with Claude
-claude mcp add codex-async -- python -m codex_async_mcp.server
+claude mcp add codex-async -s user -- python -m codex_async_mcp.server
 
 # 4. Verify
 claude mcp list
@@ -134,25 +157,20 @@ claude mcp list
 ## Usage Pattern (Claude side)
 
 ```
-# Instead of one Codex MCP call that might timeout:
-codex_start(
+# Start a task (queued automatically):
+job = codex_start(
   prompt="In prorate_calculation_service.rb line 96, change format(...) to number_to_currency(...)",
-  cwd="/Users/bbgummybear/payrollservice-thailand"
+  cwd="/Users/bbgummybear/payrollservice-thailand",
+  approval_policy="full-auto"
 )
 # → { job_id: "f3a9b2", status: "running" }
 
-# Poll until done:
-codex_poll(job_id="f3a9b2")
-# → { status: "running", output_so_far: "Reading file..." }
+# Block until done (loop with ≤10s timeout per call):
+while True:
+    result = codex_wait(job_id="f3a9b2")  # returns in ≤10 s
+    if result["status"] != "timeout":
+        break
+    # log result["output"] to show progress, then loop
 
-codex_poll(job_id="f3a9b2")
-# → { status: "done", exit_code: 0, output: "Applied changes to prorate_calculation_service.rb" }
+# → { status: "done", exit_code: 0, output: "Applied changes to ..." }
 ```
-
----
-
-## Open Questions
-
-- Should `codex_poll` block for a few seconds (long-poll) or return immediately?
-- Max output size to return in a single poll response?
-- Run MCP server as a persistent daemon or spawn per-request?
