@@ -40,6 +40,7 @@ from .config import (
     CODEX_BIN,
     CURSOR_BIN,
     DEFAULT_APPROVAL_POLICY,
+    GEMINI_BIN,
     JOBS_DIR,
     JOB_TAIL_LINES,
     MAX_JOB_DURATION,
@@ -62,6 +63,13 @@ _APPROVAL_FLAGS: dict[str, list[str]] = {
     "suggest":   ["-s", "read-only"],
     "auto-edit": ["--full-auto"],
     "full-auto": ["--dangerously-bypass-approvals-and-sandbox"],
+}
+
+# Map approval_policy → Gemini CLI flags.
+_GEMINI_APPROVAL_FLAGS: dict[str, list[str]] = {
+    "suggest":   ["--approval-mode", "plan"],
+    "auto-edit": ["--approval-mode", "auto_edit"],
+    "full-auto": ["--approval-mode", "yolo"],
 }
 
 # ── In-memory state ──────────────────────────────────────────────────────────
@@ -270,18 +278,17 @@ def _spawn_locked(job: dict) -> None:
     job_dir.mkdir(parents=True, exist_ok=True)
     output_path = job_dir / "output.txt"
 
-    flags = _APPROVAL_FLAGS.get(approval_policy, ["--full-auto"])
-
-    # Append job_id instruction so Codex can call codex_notify_done() when done.
-    # This gives Claude an immediate callback instead of waiting for process exit.
+    # Append job_id instruction so agents can notify completion when they have
+    # access to this MCP server. The monitor remains the fallback.
+    notify_tool = (
+        "gemini_notify_done"
+        if agent_type == "gemini"
+        else "codex_notify_done"
+    )
     full_prompt = (
-        f"{prompt}\n\n"
-        f"---\n"
-        f"When you have fully completed the task above, call the MCP tool "
-        f"`codex_notify_done` with:\n"
-        f"  job_id  = \"{job_id}\"\n"
-        f"  summary = one-sentence description of what was done\n"
-        f"This signals Claude that you are done so it can continue immediately."
+        f"{prompt}\n\n---\n"
+        f"On completion call MCP tool `{notify_tool}` (or `agent_notify_done`) "
+        f'with job_id="{job_id}", summary=<1-sentence>. Skip if unavailable.'
     )
     
     if agent_type == "cursor":
@@ -289,7 +296,11 @@ def _spawn_locked(job: dict) -> None:
             cmd = ["wsl", "bash", "-lc", 'agent -p --force "$1"', "--", full_prompt]
         else:
             cmd = [CURSOR_BIN, "-p", "--force", full_prompt]
+    elif agent_type == "gemini":
+        flags = _GEMINI_APPROVAL_FLAGS.get(approval_policy, ["--approval-mode", "yolo"])
+        cmd = [GEMINI_BIN, "--skip-trust"] + flags + ["--prompt", full_prompt]
     else:
+        flags = _APPROVAL_FLAGS.get(approval_policy, ["--full-auto"])
         cmd = [CODEX_BIN, "exec"] + flags + [full_prompt]
         
     now = datetime.now(timezone.utc).isoformat()
@@ -336,44 +347,77 @@ def _try_start_next_locked() -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def _inject_context(prompt: str, cwd: str, context_files: list[str] | None) -> str:
-    """Read context files and cursorrules, then prepend them to the prompt."""
-    context_blocks = []
-    
-    # Auto-detect rules
-    rules_paths = [Path(cwd) / ".cursorrules", Path(cwd) / ".cursor" / "rules"]
-    for path in rules_paths:
+# Cache: (cwd) -> (mtime_signature, rendered_blocks)
+# Invalidated when any rule file's mtime changes.
+_rules_cache: dict[str, tuple[tuple, list[str]]] = {}
+_rules_cache_lock = threading.Lock()
+
+
+def _rules_signature(cwd: str) -> tuple:
+    """Cheap fingerprint of rule files: (path, mtime) per file."""
+    sig: list[tuple[str, float]] = []
+    for path in (Path(cwd) / ".cursorrules", Path(cwd) / ".cursor" / "rules"):
+        try:
+            if path.is_file():
+                sig.append((str(path), path.stat().st_mtime))
+            elif path.is_dir():
+                for rule_file in sorted(path.glob("*")):
+                    if rule_file.is_file():
+                        sig.append((str(rule_file), rule_file.stat().st_mtime))
+        except OSError:
+            pass
+    return tuple(sig)
+
+
+def _load_rules_blocks(cwd: str) -> list[str]:
+    """Read project rule files with mtime-based caching."""
+    sig = _rules_signature(cwd)
+    if not sig:
+        return []
+
+    with _rules_cache_lock:
+        cached = _rules_cache.get(cwd)
+        if cached and cached[0] == sig:
+            return list(cached[1])
+
+    blocks: list[str] = []
+    for path in (Path(cwd) / ".cursorrules", Path(cwd) / ".cursor" / "rules"):
         if path.is_file():
             try:
-                content = path.read_text(encoding="utf-8")
-                context_blocks.append(f"--- PROJECT RULES ({path.name}) ---\n{content}\n")
+                blocks.append(f"<rules src={path.name}>\n{path.read_text(encoding='utf-8')}\n</rules>")
             except Exception as e:
                 logger.warning("Failed to read rules file %s: %s", path, e)
         elif path.is_dir():
-            for rule_file in path.glob("*"):
+            for rule_file in sorted(path.glob("*")):
                 if rule_file.is_file():
                     try:
-                        content = rule_file.read_text(encoding="utf-8")
-                        context_blocks.append(f"--- RULE ({rule_file.name}) ---\n{content}\n")
+                        blocks.append(f"<rule src={rule_file.name}>\n{rule_file.read_text(encoding='utf-8')}\n</rule>")
                     except Exception:
                         pass
-    
-    # Inject user-provided context files
+
+    with _rules_cache_lock:
+        _rules_cache[cwd] = (sig, list(blocks))
+    return blocks
+
+
+def _inject_context(prompt: str, cwd: str, context_files: list[str] | None) -> str:
+    """Prepend project rules + user context files to the prompt."""
+    context_blocks: list[str] = _load_rules_blocks(cwd)
+
     if context_files:
         for file_path in context_files:
-            # Resolve relative to cwd if not absolute
             path = Path(cwd) / file_path if not Path(file_path).is_absolute() else Path(file_path)
             if path.is_file():
                 try:
                     content = path.read_text(encoding="utf-8")
-                    context_blocks.append(f"--- FILE CONTEXT: {file_path} ---\n{content}\n")
+                    context_blocks.append(f"<file src={file_path}>\n{content}\n</file>")
                 except Exception as e:
                     logger.warning("Failed to read context file %s: %s", file_path, e)
             else:
-                context_blocks.append(f"--- FILE CONTEXT: {file_path} ---\n(File not found or is a directory)\n")
+                context_blocks.append(f"<file src={file_path}>(not found)</file>")
 
     if context_blocks:
-        return "\n".join(context_blocks) + "\n\n=== TASK ===\n" + prompt
+        return "\n".join(context_blocks) + "\n\n<task>\n" + prompt + "\n</task>"
     return prompt
 
 
