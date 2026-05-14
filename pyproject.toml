@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "codex-async-mcp"
+name = "agent-async-mcp"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -14,8 +14,8 @@ dependencies = [
 dev = ["pytest", "pytest-asyncio"]
 
 [project.scripts]
-codex-async-mcp = "codex_async_mcp.server:main"
-codex-async = "codex_async_mcp.cli:main"
+agent-async-mcp = "agent_async_mcp.server:main"
+agent-async = "agent_async_mcp.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/codex_async_mcp"]
+packages = ["src/agent_async_mcp"]

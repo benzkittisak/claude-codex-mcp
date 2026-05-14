@@ -15,7 +15,7 @@ from .job_manager import (
 init_db()
 recover_on_startup()
 
-mcp = FastMCP("codex-async-mcp")
+mcp = FastMCP("agent-async")
 
 
 def _tag(name: str, value: str | None) -> str:

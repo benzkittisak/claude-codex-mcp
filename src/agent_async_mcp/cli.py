@@ -1,4 +1,4 @@
-"""codex-async CLI — manage MCP server registrations across agents."""
+"""agent-async CLI — manage MCP server registrations across agents."""
 
 import argparse
 import json
@@ -10,21 +10,21 @@ import sys
 import tomllib
 from pathlib import Path
 
-MCP_NAME = "codex-async"
+MCP_NAME = "agent-async"
 PYTHON = sys.executable
-INSTALL_DIR = Path.home() / ".local" / "share" / "codex-async-mcp"
+INSTALL_DIR = Path.home() / ".local" / "share" / "agent-async-mcp"
 VENV_DIR = INSTALL_DIR / ".venv"
 VENV_PYTHON = VENV_DIR / "bin" / "python"
 VENV_PIP = VENV_DIR / "bin" / "pip"
 
 # LaunchAgent / cron identifiers
-_LAUNCH_AGENT_ID = "com.codex-async.update"
+_LAUNCH_AGENT_ID = "com.agent-async.update"
 _LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_LAUNCH_AGENT_ID}.plist"
-_CRON_TAG = "# codex-async auto-update"
+_CRON_TAG = "# agent-async auto-update"
 
 
 def _mcp_entry(python: str) -> dict:
-    return {"command": python, "args": ["-m", "codex_async_mcp.server"]}
+    return {"command": python, "args": ["-m", "agent_async_mcp.server"]}
 
 
 def _merge_json(path: Path, python: str) -> None:
@@ -53,7 +53,7 @@ def _registered_json(path: Path) -> bool:
 def _add_claude_code(python: str) -> None:
     subprocess.run(["claude", "mcp", "remove", MCP_NAME, "-s", "user"], capture_output=True)
     subprocess.run(
-        ["claude", "mcp", "add", MCP_NAME, "-s", "user", "--", python, "-m", "codex_async_mcp.server"],
+        ["claude", "mcp", "add", MCP_NAME, "-s", "user", "--", python, "-m", "agent_async_mcp.server"],
         check=True,
     )
 
@@ -82,8 +82,6 @@ def _codex_path() -> Path:
 # Matches [mcp_servers.<MCP_NAME>] and everything until the next [section] or EOF.
 # Safe to use for add/remove — leaves all other config untouched.
 def _codex_section_re() -> re.Pattern:
-    # Match from [mcp_servers.<name>] up to (but not including) the next top-level
-    # section header (line starting with '[') or end of file.
     return re.compile(
         r'\[mcp_servers\.' + re.escape(MCP_NAME) + r'\].*?(?=\n\[|\Z)',
         re.DOTALL,
@@ -94,7 +92,7 @@ def _codex_entry(python: str) -> str:
     return (
         f'[mcp_servers.{MCP_NAME}]\n'
         f'command = "{python}"\n'
-        f'args = [\n    "-m",\n    "codex_async_mcp.server",\n]\n'
+        f'args = [\n    "-m",\n    "agent_async_mcp.server",\n]\n'
     )
 
 
@@ -227,7 +225,7 @@ def cmd_update(check_only: bool = False) -> None:
     print(f"update available ({local[:7]} → {remote[:7]})")
 
     if check_only:
-        print("Run 'codex-async update' to apply.")
+        print("Run 'agent-async update' to apply.")
         return
 
     print("Pulling latest... ", end="", flush=True)
@@ -244,14 +242,14 @@ def cmd_update(check_only: bool = False) -> None:
 
 # ── Auto-update ───────────────────────────────────────────────────────────────
 
-def _codex_async_bin() -> str:
+def _agent_async_bin() -> str:
     """Resolved path to this CLI — used in scheduled job commands."""
-    candidate = VENV_DIR / "bin" / "codex-async"
-    return str(candidate) if candidate.exists() else shutil.which("codex-async") or "codex-async"
+    candidate = VENV_DIR / "bin" / "agent-async"
+    return str(candidate) if candidate.exists() else shutil.which("agent-async") or "agent-async"
 
 
 def cmd_enable_auto_update() -> None:
-    cli = _codex_async_bin()
+    cli = _agent_async_bin()
 
     if sys.platform == "darwin":
         plist = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -270,8 +268,8 @@ def cmd_enable_auto_update() -> None:
         <key>Hour</key>   <integer>9</integer>
         <key>Minute</key> <integer>0</integer>
     </dict>
-    <key>StandardOutPath</key>  <string>{Path.home()}/.codex-async/update.log</string>
-    <key>StandardErrorPath</key> <string>{Path.home()}/.codex-async/update.log</string>
+    <key>StandardOutPath</key>  <string>{Path.home()}/.agent-async/update.log</string>
+    <key>StandardErrorPath</key> <string>{Path.home()}/.agent-async/update.log</string>
     <key>RunAtLoad</key> <false/>
 </dict>
 </plist>
@@ -280,20 +278,20 @@ def cmd_enable_auto_update() -> None:
         _LAUNCH_AGENT_PATH.write_text(plist)
         subprocess.run(["launchctl", "unload", str(_LAUNCH_AGENT_PATH)], capture_output=True)
         subprocess.run(["launchctl", "load", str(_LAUNCH_AGENT_PATH)], check=True)
-        print(f"Auto-update enabled (daily 09:00). Log: ~/.codex-async/update.log")
+        print(f"Auto-update enabled (daily 09:00). Log: ~/.agent-async/update.log")
 
     elif sys.platform.startswith("linux"):
-        cron_line = f"0 9 * * * {cli} update >> ~/.codex-async/update.log 2>&1  {_CRON_TAG}"
+        cron_line = f"0 9 * * * {cli} update >> ~/.agent-async/update.log 2>&1  {_CRON_TAG}"
         existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
         if _CRON_TAG in existing:
             print("Auto-update already enabled.")
             return
         new_crontab = existing.rstrip() + "\n" + cron_line + "\n"
         subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
-        print("Auto-update enabled (daily 09:00). Log: ~/.codex-async/update.log")
+        print("Auto-update enabled (daily 09:00). Log: ~/.agent-async/update.log")
 
     else:
-        print("Auto-update not supported on this platform. Run 'codex-async update' manually.",
+        print("Auto-update not supported on this platform. Run 'agent-async update' manually.",
               file=sys.stderr)
 
 
@@ -315,8 +313,8 @@ def cmd_uninstall() -> None:
 
     print("\nThis will remove:")
     print(f"  • {INSTALL_DIR}  (repo + venv)")
-    print(f"  • {LOCAL_BIN}/codex-async  (symlink)")
-    data_dir = Path.home() / ".codex-async"
+    print(f"  • {LOCAL_BIN}/agent-async  (symlink)")
+    data_dir = Path.home() / ".agent-async"
     if data_dir.exists():
         print(f"  • {data_dir}  (job data — optional)")
     if _LAUNCH_AGENT_PATH.exists():
@@ -433,8 +431,8 @@ def cmd_remove(agent: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="codex-async",
-        description="Manage codex-async-mcp registrations across AI agents.",
+        prog="agent-async",
+        description="Manage agent-async-mcp registrations across AI agents.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -453,7 +451,7 @@ def main() -> None:
 
     sub.add_parser("enable-auto-update", help="Schedule daily auto-update (09:00)")
     sub.add_parser("disable-auto-update", help="Remove scheduled auto-update")
-    sub.add_parser("uninstall", help="Remove codex-async-mcp from this machine")
+    sub.add_parser("uninstall", help="Remove agent-async-mcp from this machine")
 
     args = parser.parse_args()
 

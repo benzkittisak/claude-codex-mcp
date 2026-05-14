@@ -4,8 +4,8 @@ import os
 import sys
 from pathlib import Path
 
-DB_PATH = Path.home() / ".codex-async" / "queue.db"
-JOBS_DIR = Path.home() / ".codex-async" / "jobs"
+DB_PATH = Path.home() / ".agent-async" / "queue.db"
+JOBS_DIR = Path.home() / ".agent-async" / "jobs"
 
 def get_db_connection():
     try:

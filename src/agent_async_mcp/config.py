@@ -1,7 +1,7 @@
 from pathlib import Path
 
-JOBS_DIR = Path.home() / ".codex-async" / "jobs"
-DB_PATH = Path.home() / ".codex-async" / "queue.db"
+JOBS_DIR = Path.home() / ".agent-async" / "jobs"
+DB_PATH = Path.home() / ".agent-async" / "queue.db"
 DEFAULT_APPROVAL_POLICY = "suggest"
 CODEX_BIN = "codex"
 CURSOR_BIN = "agent"

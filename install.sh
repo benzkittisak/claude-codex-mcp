@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# codex-async-mcp installer / uninstaller
+# agent-async-mcp installer / uninstaller
 # Install:   curl -fsSL https://raw.githubusercontent.com/benzkittisak/claude-codex-mcp/master/install.sh | bash
 # Uninstall: curl -fsSL https://raw.githubusercontent.com/benzkittisak/claude-codex-mcp/master/install.sh | bash -s uninstall
 #            or: bash install.sh uninstall
@@ -7,24 +7,24 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/benzkittisak/claude-codex-mcp"
-INSTALL_DIR="${HOME}/.local/share/codex-async-mcp"
+INSTALL_DIR="${HOME}/.local/share/agent-async-mcp"
 LOCAL_BIN="${HOME}/.local/bin"
 VENV_DIR="${INSTALL_DIR}/.venv"
-MCP_NAME="codex-async"
+MCP_NAME="agent-async"
 
 # ── colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
 BOLD='\033[1m'; NC='\033[0m'
-info()  { echo -e "${BLUE}[codex-async]${NC} $*"; }
-ok()    { echo -e "${GREEN}[codex-async]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[codex-async]${NC} $*"; }
-die()   { echo -e "${RED}[codex-async] ERROR:${NC} $*" >&2; exit 1; }
+info()  { echo -e "${BLUE}[agent-async]${NC} $*"; }
+ok()    { echo -e "${GREEN}[agent-async]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[agent-async]${NC} $*"; }
+die()   { echo -e "${RED}[agent-async] ERROR:${NC} $*" >&2; exit 1; }
 
 # ── uninstall ─────────────────────────────────────────────────────────────────
 
 uninstall() {
     echo ""
-    echo -e "${BOLD}codex-async-mcp uninstaller${NC}"
+    echo -e "${BOLD}agent-async-mcp uninstaller${NC}"
     echo "────────────────────────────────────────"
     echo ""
 
@@ -53,7 +53,7 @@ uninstall() {
     fi
 
     # Remove data directory
-    DATA_DIR="${HOME}/.codex-async"
+    DATA_DIR="${HOME}/.agent-async"
     if [[ -d "${DATA_DIR}" ]]; then
         printf "Remove job data at %s? [y/n]: " "${DATA_DIR}"
         read -r ans </dev/tty
@@ -66,7 +66,7 @@ uninstall() {
     fi
 
     # Remove LaunchAgent (macOS)
-    LAUNCH_AGENT="${HOME}/Library/LaunchAgents/com.codex-async.update.plist"
+    LAUNCH_AGENT="${HOME}/Library/LaunchAgents/com.agent-async.update.plist"
     if [[ -f "${LAUNCH_AGENT}" ]]; then
         launchctl unload "${LAUNCH_AGENT}" 2>/dev/null || true
         rm "${LAUNCH_AGENT}"
@@ -230,6 +230,9 @@ detect_agents() {
     command -v claude &>/dev/null \
         && DETECTED_AGENTS+=("claude-code|Claude Code CLI")
 
+    { command -v codex &>/dev/null || [[ -d "${HOME}/.codex" ]]; } \
+        && DETECTED_AGENTS+=("codex|Codex CLI")
+
     { command -v cursor &>/dev/null || [[ -d "${HOME}/.cursor" ]]; } \
         && DETECTED_AGENTS+=("cursor|Cursor IDE")
 
@@ -245,7 +248,7 @@ select_agents() {
 
     if [[ ${#DETECTED_AGENTS[@]} -eq 0 ]]; then
         warn "No supported agents detected on this machine."
-        warn "Register manually later: codex-async add-agent <agent>"
+        warn "Register manually later: agent-async add-agent <agent>"
         warn "Agents: claude-code | cursor | claude-desktop"
         return
     fi
@@ -279,8 +282,8 @@ register_agents() {
 
     for agent in "${SELECTED_AGENTS[@]}"; do
         info "  → $agent"
-        "${python}" -m codex_async_mcp.cli add-agent "$agent" --python "$python" \
-            || warn "    Failed to register $agent — run: codex-async add-agent $agent"
+        "${python}" -m agent_async_mcp.cli add-agent "$agent" --python "$python" \
+            || warn "    Failed to register $agent — run: agent-async add-agent $agent"
     done
 }
 
@@ -289,7 +292,7 @@ register_agents() {
 [[ "${1:-}" == "uninstall" ]] && uninstall && exit 0
 
 echo ""
-echo -e "${BOLD}codex-async-mcp installer${NC}"
+echo -e "${BOLD}agent-async-mcp installer${NC}"
 echo "────────────────────────────────────────"
 echo ""
 
@@ -315,14 +318,14 @@ info "Installing package..."
 ok "Package installed."
 
 # Verify import
-"${PYTHON}" -c "import codex_async_mcp" \
+"${PYTHON}" -c "import agent_async_mcp" \
     || die "Import failed — check Python environment."
 
 # ── symlink CLI to ~/.local/bin ───────────────────────────────────────────────
 
 mkdir -p "${LOCAL_BIN}"
-ln -sf "${VENV_DIR}/bin/codex-async" "${LOCAL_BIN}/codex-async"
-ok "CLI linked → ${LOCAL_BIN}/codex-async"
+ln -sf "${VENV_DIR}/bin/agent-async" "${LOCAL_BIN}/agent-async"
+ok "CLI linked → ${LOCAL_BIN}/agent-async"
 
 # Ensure ~/.local/bin is in PATH across all common shell profiles
 _path_line='export PATH="${HOME}/.local/bin:${PATH}"'
@@ -334,7 +337,7 @@ add_to_path() {
     # Append (create file if needed)
     {
         echo ""
-        echo "# codex-async"
+        echo "# agent-async"
         echo "${_path_line}"
     } >> "$profile"
     ok "  added PATH to ${profile}"
@@ -360,7 +363,7 @@ register_agents "${PYTHON}"
 # ── smoke test ────────────────────────────────────────────────────────────────
 
 smoke_test() {
-    local cli="${LOCAL_BIN}/codex-async"
+    local cli="${LOCAL_BIN}/agent-async"
     local pass=0 fail=0
 
     echo ""
@@ -372,12 +375,12 @@ smoke_test() {
         echo -e "${GREEN}PASS${NC}"; (( pass++ ))
     else
         echo -e "${RED}FAIL${NC}"; (( fail++ ))
-        echo "    FIX: ln -sf ${VENV_DIR}/bin/codex-async ${cli}"
+        echo "    FIX: ln -sf ${VENV_DIR}/bin/agent-async ${cli}"
     fi
 
     # 2. CLI reachable in PATH
-    printf "    %-45s" "codex-async in PATH"
-    if command -v codex-async &>/dev/null; then
+    printf "    %-45s" "agent-async in PATH"
+    if command -v agent-async &>/dev/null; then
         echo -e "${GREEN}PASS${NC}"; (( pass++ ))
     else
         echo -e "${YELLOW}WARN${NC} (need new terminal)"; (( pass++ ))
@@ -385,8 +388,8 @@ smoke_test() {
     fi
 
     # 3. Python import
-    printf "    %-45s" "Python import codex_async_mcp"
-    if "${PYTHON}" -c "import codex_async_mcp" 2>/dev/null; then
+    printf "    %-45s" "Python import agent_async_mcp"
+    if "${PYTHON}" -c "import agent_async_mcp" 2>/dev/null; then
         echo -e "${GREEN}PASS${NC}"; (( pass++ ))
     else
         echo -e "${RED}FAIL${NC}"; (( fail++ ))
@@ -396,8 +399,8 @@ smoke_test() {
     # 4. MCP server starts and exits cleanly (1-second timeout)
     printf "    %-45s" "MCP server starts"
     if timeout 2s "${PYTHON}" -c "
-from codex_async_mcp.db import init_db
-from codex_async_mcp.job_manager import recover_on_startup
+from agent_async_mcp.db import init_db
+from agent_async_mcp.job_manager import recover_on_startup
 init_db(); recover_on_startup()
 print('ok')
 " 2>/dev/null | grep -q ok; then
@@ -416,7 +419,7 @@ print('ok')
         echo -e "${GREEN}PASS${NC} (${reg} agent(s))"; (( pass++ ))
     else
         echo -e "${YELLOW}WARN${NC} no agents registered"
-        echo "    FIX: codex-async add-agent claude-code"
+        echo "    FIX: agent-async add-agent claude-code"
     fi
 
     echo ""
@@ -436,20 +439,20 @@ echo "────────────────────────�
 ok "Done! Restart your agent to load the server."
 echo ""
 echo -e "  ${BOLD}CLI commands:${NC}"
-echo "    codex-async list-agents              # show detected / registered agents"
-echo "    codex-async add-agent claude-code    # register with Claude Code CLI"
-echo "    codex-async add-agent codex          # register with Codex CLI"
-echo "    codex-async add-agent cursor         # register with Cursor IDE"
-echo "    codex-async add-agent claude-desktop # register with Claude Desktop"
-echo "    codex-async remove-agent <agent>     # unregister"
-echo "    codex-async update                   # pull latest + reinstall"
-echo "    codex-async enable-auto-update       # schedule daily auto-update"
-echo "    codex-async uninstall                # remove everything"
+echo "    agent-async list-agents              # show detected / registered agents"
+echo "    agent-async add-agent claude-code    # register with Claude Code CLI"
+echo "    agent-async add-agent codex          # register with Codex CLI"
+echo "    agent-async add-agent cursor         # register with Cursor IDE"
+echo "    agent-async add-agent claude-desktop # register with Claude Desktop"
+echo "    agent-async remove-agent <agent>     # unregister"
+echo "    agent-async update                   # pull latest + reinstall"
+echo "    agent-async enable-auto-update       # schedule daily auto-update"
+echo "    agent-async uninstall                # remove everything"
 echo ""
 echo -e "  ${BOLD}Permissions to add in .claude/settings.local.json:${NC}"
-echo '    "mcp__codex-async__codex_start",   "mcp__codex-async__codex_wait",'
-echo '    "mcp__codex-async__cursor_start",  "mcp__codex-async__cursor_wait",'
-echo '    "mcp__codex-async__gemini_start",  "mcp__codex-async__gemini_wait",'
-echo '    "mcp__codex-async__queue_status",  "mcp__codex-async__job_list",'
-echo '    "mcp__codex-async__job_cancel",    "mcp__codex-async__agent_notify_done"'
+echo '    "mcp__agent-async__codex_start",   "mcp__agent-async__codex_wait",'
+echo '    "mcp__agent-async__cursor_start",  "mcp__agent-async__cursor_wait",'
+echo '    "mcp__agent-async__gemini_start",  "mcp__agent-async__gemini_wait",'
+echo '    "mcp__agent-async__queue_status",  "mcp__agent-async__job_list",'
+echo '    "mcp__agent-async__job_cancel",    "mcp__agent-async__agent_notify_done"'
 echo ""
