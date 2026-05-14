@@ -134,6 +134,34 @@ ok "Package installed."
 "${PYTHON}" -c "import codex_async_mcp" \
     || die "Import failed — check Python environment."
 
+# ── symlink CLI to ~/.local/bin ───────────────────────────────────────────────
+
+LOCAL_BIN="${HOME}/.local/bin"
+mkdir -p "${LOCAL_BIN}"
+ln -sf "${VENV_DIR}/bin/codex-async" "${LOCAL_BIN}/codex-async"
+ok "CLI linked → ${LOCAL_BIN}/codex-async"
+
+# Ensure ~/.local/bin is in PATH (add to shell profile if missing)
+add_to_path() {
+    local profile="$1"
+    local line='export PATH="${HOME}/.local/bin:${PATH}"'
+    if [[ -f "$profile" ]] && grep -q '\.local/bin' "$profile"; then
+        return
+    fi
+    if [[ -f "$profile" ]]; then
+        echo "" >> "$profile"
+        echo "# codex-async-mcp" >> "$profile"
+        echo "$line" >> "$profile"
+        warn "Added ~/.local/bin to PATH in ${profile}. Run: source ${profile}"
+    fi
+}
+
+if [[ ":${PATH}:" != *":${LOCAL_BIN}:"* ]]; then
+    add_to_path "${HOME}/.zshrc"
+    add_to_path "${HOME}/.bashrc"
+    export PATH="${LOCAL_BIN}:${PATH}"
+fi
+
 # Detect + let user pick agents
 detect_agents
 select_agents
