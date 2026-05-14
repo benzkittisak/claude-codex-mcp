@@ -120,16 +120,14 @@ fi
 
 VENV_DIR="${INSTALL_DIR}/.venv"
 
+info "Creating virtual environment..."
+"${PYTHON}" -m venv "${VENV_DIR}"
+PYTHON="${VENV_DIR}/bin/python"
+PIP="${VENV_DIR}/bin/pip"
+
 info "Installing package..."
-if command -v uv &>/dev/null; then
-    uv venv --python "${PYTHON}" "${VENV_DIR}" --quiet
-    uv pip install --python "${VENV_DIR}/bin/python" -e "${INSTALL_DIR}" --quiet
-    PYTHON="${VENV_DIR}/bin/python"
-else
-    "${PYTHON}" -m venv "${VENV_DIR}"
-    PYTHON="${VENV_DIR}/bin/python"
-    "${PYTHON}" -m pip install --quiet -e "${INSTALL_DIR}"
-fi
+"${PIP}" install --quiet --upgrade pip
+"${PIP}" install --quiet -e "${INSTALL_DIR}"
 ok "Package installed."
 
 # Verify import
