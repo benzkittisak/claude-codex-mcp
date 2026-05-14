@@ -13,6 +13,7 @@ from pathlib import Path
 MCP_NAME = "agent-async"
 PYTHON = sys.executable
 INSTALL_DIR = Path.home() / ".local" / "share" / "agent-async-mcp"
+LOCAL_BIN = Path.home() / ".local" / "bin"
 VENV_DIR = INSTALL_DIR / ".venv"
 VENV_PYTHON = VENV_DIR / "bin" / "python"
 VENV_PIP = VENV_DIR / "bin" / "pip"
