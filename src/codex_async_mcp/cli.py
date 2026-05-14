@@ -3,9 +3,11 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 MCP_NAME = "codex-async"
@@ -71,6 +73,62 @@ def _cursor_path() -> Path:
     return Path.home() / ".cursor" / "mcp.json"
 
 
+# ── Codex CLI ─────────────────────────────────────────────────────────────────
+
+def _codex_path() -> Path:
+    return Path.home() / ".codex" / "config.toml"
+
+
+# Matches [mcp_servers.<MCP_NAME>] and everything until the next [section] or EOF.
+# Safe to use for add/remove — leaves all other config untouched.
+def _codex_section_re() -> re.Pattern:
+    # Match from [mcp_servers.<name>] up to (but not including) the next top-level
+    # section header (line starting with '[') or end of file.
+    return re.compile(
+        r'\[mcp_servers\.' + re.escape(MCP_NAME) + r'\].*?(?=\n\[|\Z)',
+        re.DOTALL,
+    )
+
+
+def _codex_entry(python: str) -> str:
+    return (
+        f'[mcp_servers.{MCP_NAME}]\n'
+        f'command = "{python}"\n'
+        f'args = [\n    "-m",\n    "codex_async_mcp.server",\n]\n'
+    )
+
+
+def _add_codex(python: str) -> None:
+    path = _codex_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = _codex_entry(python)
+    if not path.exists():
+        path.write_text(entry)
+        return
+    text = path.read_text()
+    if f'[mcp_servers.{MCP_NAME}]' in text:
+        text = _codex_section_re().sub(entry, text)
+    else:
+        text = text.rstrip('\n') + '\n\n' + entry
+    path.write_text(text)
+
+
+def _remove_codex() -> None:
+    path = _codex_path()
+    if not path.exists():
+        return
+    text = _codex_section_re().sub('', path.read_text()).strip('\n') + '\n'
+    path.write_text(text)
+
+
+def _status_codex() -> bool:
+    path = _codex_path()
+    if not path.exists():
+        return False
+    with open(path, "rb") as f:
+        return MCP_NAME in tomllib.load(f).get("mcp_servers", {})
+
+
 # ── Claude Desktop ────────────────────────────────────────────────────────────
 
 def _desktop_path() -> Path | None:
@@ -93,6 +151,13 @@ AGENTS: dict[str, dict] = {
         "add": _add_claude_code,
         "remove": _remove_claude_code,
         "status": _status_claude_code,
+    },
+    "codex": {
+        "label": "Codex CLI",
+        "detect": lambda: shutil.which("codex") is not None or _codex_path().parent.exists(),
+        "add": _add_codex,
+        "remove": _remove_codex,
+        "status": _status_codex,
     },
     "cursor": {
         "label": "Cursor IDE",
