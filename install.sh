@@ -324,25 +324,32 @@ mkdir -p "${LOCAL_BIN}"
 ln -sf "${VENV_DIR}/bin/codex-async" "${LOCAL_BIN}/codex-async"
 ok "CLI linked → ${LOCAL_BIN}/codex-async"
 
-# Ensure ~/.local/bin is in PATH (add to shell profile if missing)
+# Ensure ~/.local/bin is in PATH across all common shell profiles
+_path_line='export PATH="${HOME}/.local/bin:${PATH}"'
+
 add_to_path() {
     local profile="$1"
-    local line='export PATH="${HOME}/.local/bin:${PATH}"'
-    if [[ -f "$profile" ]] && grep -q '\.local/bin' "$profile"; then
-        return
-    fi
-    if [[ -f "$profile" ]]; then
-        echo "" >> "$profile"
-        echo "# codex-async-mcp" >> "$profile"
-        echo "$line" >> "$profile"
-        warn "Added ~/.local/bin to PATH in ${profile}. Run: source ${profile}"
-    fi
+    # Skip if already has ~/.local/bin
+    [[ -f "$profile" ]] && grep -q '\.local/bin' "$profile" && return
+    # Append (create file if needed)
+    {
+        echo ""
+        echo "# codex-async"
+        echo "${_path_line}"
+    } >> "$profile"
+    ok "  added PATH to ${profile}"
 }
 
 if [[ ":${PATH}:" != *":${LOCAL_BIN}:"* ]]; then
+    info "Adding ~/.local/bin to shell profiles..."
+    # zsh: interactive + login
     add_to_path "${HOME}/.zshrc"
+    add_to_path "${HOME}/.zprofile"
+    # bash: interactive + login
     add_to_path "${HOME}/.bashrc"
+    add_to_path "${HOME}/.bash_profile"
     export PATH="${LOCAL_BIN}:${PATH}"
+    warn "Open a new terminal (or run: source ~/.zshrc) for PATH to take effect."
 fi
 
 # Detect + let user pick agents
@@ -358,10 +365,14 @@ ok "Done! Restart your agent to load the server."
 echo ""
 echo -e "  ${BOLD}CLI commands:${NC}"
 echo "    codex-async list-agents              # show detected / registered agents"
-echo "    codex-async add-agent claude-code    # register with Claude Code"
-echo "    codex-async add-agent cursor         # register with Cursor"
+echo "    codex-async add-agent claude-code    # register with Claude Code CLI"
+echo "    codex-async add-agent codex          # register with Codex CLI"
+echo "    codex-async add-agent cursor         # register with Cursor IDE"
 echo "    codex-async add-agent claude-desktop # register with Claude Desktop"
 echo "    codex-async remove-agent <agent>     # unregister"
+echo "    codex-async update                   # pull latest + reinstall"
+echo "    codex-async enable-auto-update       # schedule daily auto-update"
+echo "    codex-async uninstall                # remove everything"
 echo ""
 echo -e "  ${BOLD}Permissions to add in .claude/settings.local.json:${NC}"
 echo '    "mcp__codex-async__codex_start",   "mcp__codex-async__codex_wait",'
