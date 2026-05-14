@@ -310,8 +310,8 @@ PYTHON="${VENV_DIR}/bin/python"
 PIP="${VENV_DIR}/bin/pip"
 
 info "Installing package..."
-"${PIP}" install --quiet --upgrade pip
-"${PIP}" install --quiet -e "${INSTALL_DIR}"
+"${PIP}" install --quiet --no-cache-dir --upgrade pip
+"${PIP}" install --quiet --no-cache-dir -e "${INSTALL_DIR}"
 ok "Package installed."
 
 # Verify import
