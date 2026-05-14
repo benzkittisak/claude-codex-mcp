@@ -89,17 +89,137 @@ ask() {
     [[ "$ans" == "y" || "$ans" == "Y" ]]
 }
 
+# ── OS detection ──────────────────────────────────────────────────────────────
+
+OS="unknown"        # macos | linux
+DISTRO=""           # ubuntu | debian | fedora | arch | ...
+PKG_MANAGER=""      # brew | apt | dnf | pacman | zypper
+
+detect_os() {
+    case "$(uname -s)" in
+        Darwin)
+            OS="macos"
+            PKG_MANAGER="brew"
+            ;;
+        Linux)
+            OS="linux"
+            if [[ -f /etc/os-release ]]; then
+                # shellcheck disable=SC1091
+                . /etc/os-release
+                DISTRO="${ID:-unknown}"
+            fi
+            case "${DISTRO}" in
+                ubuntu|debian|pop|linuxmint|kali) PKG_MANAGER="apt" ;;
+                fedora|rhel|centos|rocky|alma)    PKG_MANAGER="dnf" ;;
+                arch|manjaro|endeavouros)         PKG_MANAGER="pacman" ;;
+                opensuse*|sles)                   PKG_MANAGER="zypper" ;;
+            esac
+            ;;
+    esac
+}
+
+# Install a system package. Args: <macos> <apt> <dnf> <pacman> <zypper>
+pkg_install() {
+    local p_brew="$1" p_apt="$2" p_dnf="$3" p_pacman="$4" p_zypper="${5:-$3}"
+    case "${PKG_MANAGER}" in
+        brew)
+            command -v brew &>/dev/null \
+                || die "Homebrew required. Install: https://brew.sh"
+            brew install "${p_brew}"
+            ;;
+        apt)
+            local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+            ${SUDO} apt-get update -qq
+            ${SUDO} apt-get install -y "${p_apt}"
+            ;;
+        dnf)
+            local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+            ${SUDO} dnf install -y "${p_dnf}"
+            ;;
+        pacman)
+            local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+            ${SUDO} pacman -S --noconfirm "${p_pacman}"
+            ;;
+        zypper)
+            local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+            ${SUDO} zypper install -y "${p_zypper}"
+            ;;
+        *)
+            die "Cannot auto-install on this OS/distro (${OS}/${DISTRO}). Install manually."
+            ;;
+    esac
+}
+
 # ── prerequisites ─────────────────────────────────────────────────────────────
 
 find_python() {
-    for py in python3 python; do
+    # Prefer versioned binaries first
+    for py in python3.13 python3.12 python3.11 python3 python; do
         if command -v "$py" &>/dev/null; then
             local ver
             ver=$("$py" -c "import sys; print(sys.version_info >= (3, 11))" 2>/dev/null || echo False)
             [[ "$ver" == "True" ]] && echo "$py" && return
         fi
     done
-    die "Python 3.11+ required. Install from https://python.org or: brew install python@3.13"
+    return 1
+}
+
+check_deps() {
+    detect_os
+    info "Detected OS: ${OS}${DISTRO:+ / ${DISTRO}}"
+
+    # git
+    if ! command -v git &>/dev/null; then
+        warn "git not found — installing..."
+        pkg_install git git git git git
+        command -v git &>/dev/null || die "git install failed."
+        ok "git installed."
+    fi
+
+    # Python 3.11+
+    if ! find_python &>/dev/null; then
+        warn "Python 3.11+ not found — installing..."
+        case "${PKG_MANAGER}" in
+            brew)   brew install python@3.13 ;;
+            apt)
+                local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+                ${SUDO} apt-get update -qq
+                ${SUDO} apt-get install -y python3 python3-venv python3-pip
+                ;;
+            dnf)
+                local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+                ${SUDO} dnf install -y python3 python3-pip
+                ;;
+            pacman)
+                local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+                ${SUDO} pacman -S --noconfirm python
+                ;;
+            zypper)
+                local SUDO; SUDO=$(command -v sudo 2>/dev/null || true)
+                ${SUDO} zypper install -y python3 python3-pip
+                ;;
+            *)
+                die "Python 3.11+ required. Install from https://python.org"
+                ;;
+        esac
+        find_python &>/dev/null || die "Python 3.11+ still not found after install."
+        ok "Python installed."
+    fi
+
+    # Warn about optional agent CLIs (can't auto-install — require accounts)
+    local missing_agents=()
+    command -v claude  &>/dev/null || missing_agents+=("claude  → https://claude.ai/code")
+    command -v codex   &>/dev/null || missing_agents+=("codex   → npm install -g @openai/codex")
+    command -v cursor  &>/dev/null || missing_agents+=("cursor  → https://cursor.com")
+    command -v gemini  &>/dev/null || missing_agents+=("gemini  → https://github.com/google-gemini/gemini-cli")
+
+    if [[ ${#missing_agents[@]} -gt 0 ]]; then
+        echo ""
+        warn "Optional agent CLIs not found (install separately if needed):"
+        for a in "${missing_agents[@]}"; do
+            echo "    $a"
+        done
+    fi
 }
 
 # ── detect agents ─────────────────────────────────────────────────────────────
@@ -173,9 +293,9 @@ echo -e "${BOLD}codex-async-mcp installer${NC}"
 echo "────────────────────────────────────────"
 echo ""
 
-info "Checking Python..."
+check_deps
 PYTHON=$(find_python)
-ok "Found: $($PYTHON --version)"
+ok "Using: $($PYTHON --version)"
 
 info "Cloning / updating → ${INSTALL_DIR}"
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
