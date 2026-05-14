@@ -297,6 +297,19 @@ def cmd_enable_auto_update() -> None:
               file=sys.stderr)
 
 
+def cmd_status() -> None:
+    monitor = INSTALL_DIR / "mcp-monitor.py"
+    if not monitor.exists():
+        print(f"Monitor script not found: {monitor}", file=sys.stderr)
+        print("Re-run the installer to update.", file=sys.stderr)
+        sys.exit(1)
+    python = VENV_PYTHON if VENV_PYTHON.exists() else Path(sys.executable)
+    try:
+        subprocess.run([str(python), str(monitor)])
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_uninstall() -> None:
     import shutil as _shutil
 
@@ -434,6 +447,7 @@ def main() -> None:
 
     sub.add_parser("list-agents", help="Show all detected and registered agents")
 
+    sub.add_parser("status", help="Open real-time job monitor dashboard")
     sub.add_parser("update", help="Pull latest version and reinstall")
     sub.add_parser("check-update", help="Check if an update is available (no install)")
 
@@ -443,7 +457,9 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "add-agent":
+    if args.command == "status":
+        cmd_status()
+    elif args.command == "add-agent":
         cmd_add(args.agent, args.python)
     elif args.command == "remove-agent":
         cmd_remove(args.agent)
