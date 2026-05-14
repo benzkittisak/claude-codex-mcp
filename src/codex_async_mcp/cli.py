@@ -297,6 +297,66 @@ def cmd_enable_auto_update() -> None:
               file=sys.stderr)
 
 
+def cmd_uninstall() -> None:
+    import shutil as _shutil
+
+    print("\nThis will remove:")
+    print(f"  • {INSTALL_DIR}  (repo + venv)")
+    print(f"  • {LOCAL_BIN}/codex-async  (symlink)")
+    data_dir = Path.home() / ".codex-async"
+    if data_dir.exists():
+        print(f"  • {data_dir}  (job data — optional)")
+    if _LAUNCH_AGENT_PATH.exists():
+        print(f"  • {_LAUNCH_AGENT_PATH}  (auto-update)")
+    print()
+    try:
+        ans = input("Proceed? [y/n]: ").strip().lower()
+    except EOFError:
+        ans = "n"
+    if ans != "y":
+        print("Aborted.")
+        return
+
+    # deregister all agents
+    print("\nRemoving agent registrations...")
+    for name, info in AGENTS.items():
+        try:
+            if info["status"]():
+                info["remove"]()
+                print(f"  removed: {name}")
+        except Exception:
+            pass
+
+    # symlink
+    symlink = Path(LOCAL_BIN) / MCP_NAME
+    if symlink.is_symlink():
+        symlink.unlink()
+        print(f"Removed symlink: {symlink}")
+
+    # install dir
+    if INSTALL_DIR.exists():
+        _shutil.rmtree(INSTALL_DIR)
+        print(f"Removed: {INSTALL_DIR}")
+
+    # job data (ask)
+    if data_dir.exists():
+        try:
+            ans2 = input(f"Remove job data at {data_dir}? [y/n]: ").strip().lower()
+        except EOFError:
+            ans2 = "n"
+        if ans2 == "y":
+            _shutil.rmtree(data_dir)
+            print(f"Removed: {data_dir}")
+
+    # LaunchAgent
+    if _LAUNCH_AGENT_PATH.exists():
+        subprocess.run(["launchctl", "unload", str(_LAUNCH_AGENT_PATH)], capture_output=True)
+        _LAUNCH_AGENT_PATH.unlink()
+        print("Removed LaunchAgent auto-update.")
+
+    print("\nUninstall complete.")
+
+
 def cmd_disable_auto_update() -> None:
     if sys.platform == "darwin":
         if _LAUNCH_AGENT_PATH.exists():
@@ -379,6 +439,7 @@ def main() -> None:
 
     sub.add_parser("enable-auto-update", help="Schedule daily auto-update (09:00)")
     sub.add_parser("disable-auto-update", help="Remove scheduled auto-update")
+    sub.add_parser("uninstall", help="Remove codex-async-mcp from this machine")
 
     args = parser.parse_args()
 
@@ -396,6 +457,8 @@ def main() -> None:
         cmd_enable_auto_update()
     elif args.command == "disable-auto-update":
         cmd_disable_auto_update()
+    elif args.command == "uninstall":
+        cmd_uninstall()
 
 
 if __name__ == "__main__":
