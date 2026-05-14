@@ -3,7 +3,16 @@
     "allow": [
       "Bash(pip install *)",
       "Bash(python *)",
-      "Bash(claude mcp *)"
+      "Bash(claude mcp *)",
+      "Bash(rtk read *)",
+      "Bash(.venv/bin/python *)",
+      "Bash(rtk grep *)",
+      "Bash(python3 -m json.tool /Users/bbgummybear/payrollservice-thailand/.claude/settings.local.json)",
+      "Bash(rtk ls *)",
+      "Bash(chmod +x /Users/bbgummybear/payroll-mcp/install.sh)",
+      "Bash(bash -n /Users/bbgummybear/payroll-mcp/install.sh)",
+      "Bash(codex-async --help)",
+      "Bash(codex-async add-agent *)"
     ]
   }
 }

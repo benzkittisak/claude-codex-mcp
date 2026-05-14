@@ -5,6 +5,7 @@ DB_PATH = Path.home() / ".codex-async" / "queue.db"
 DEFAULT_APPROVAL_POLICY = "suggest"
 CODEX_BIN = "codex"
 CURSOR_BIN = "agent"
+GEMINI_BIN = "gemini"
 JOB_TAIL_LINES = 100
 MAX_OUTPUT_CHARS = 8000
 

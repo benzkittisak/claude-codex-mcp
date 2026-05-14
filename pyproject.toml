@@ -15,6 +15,7 @@ dev = ["pytest", "pytest-asyncio"]
 
 [project.scripts]
 codex-async-mcp = "codex_async_mcp.server:main"
+codex-async = "codex_async_mcp.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codex_async_mcp"]

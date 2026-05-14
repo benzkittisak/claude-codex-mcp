@@ -285,11 +285,7 @@ def _spawn_locked(job: dict) -> None:
 
     # Append job_id instruction so agents can notify completion when they have
     # access to this MCP server. The monitor remains the fallback.
-    notify_tool = (
-        "gemini_notify_done"
-        if agent_type == "gemini"
-        else "codex_notify_done"
-    )
+    notify_tool = "agent_notify_done"
     full_prompt = (
         f"{prompt}\n\n---\n"
         f"On completion call MCP tool `{notify_tool}` (or `agent_notify_done`) "
@@ -563,49 +559,19 @@ def await_any_completion(timeout_seconds: float = 300) -> dict:
 
 
 def get_queue_status() -> dict:
-    """Return a snapshot of the full queue state."""
-    all_jobs = db_list_jobs(limit=50)
+    """Return a minimal queue snapshot: busy or free, plus pending count."""
+    running = db_get_running()
+    pending_count = db_count_status("pending")
 
-    running = next((j for j in all_jobs if j["status"] == "running"), None)
-    pending = sorted(
-        [j for j in all_jobs if j["status"] == "pending"],
-        key=lambda j: j["created_at"],
-    )
-    recent_done = [
-        j for j in all_jobs
-        if j["status"] in ("done", "error", "cancelled")
-    ][:5]
-
+    if running:
+        return {
+            "busy": True,
+            "running_job_id": running["job_id"],
+            "pending_count": pending_count,
+        }
     return {
-        "running": (
-            {
-                "job_id":     running["job_id"],
-                "prompt":     running["prompt"][:120],
-                "cwd":        running["cwd"],
-                "started_at": running["started_at"],
-            }
-            if running else None
-        ),
-        "pending_count": len(pending),
-        "pending": [
-            {
-                "job_id":         j["job_id"],
-                "queue_position": i + 1,
-                "prompt":         j["prompt"][:120],
-                "created_at":     j["created_at"],
-            }
-            for i, j in enumerate(pending)
-        ],
-        "recent_completed": [
-            {
-                "job_id":      j["job_id"],
-                "status":      j["status"],
-                "prompt":      j["prompt"][:120],
-                "finished_at": j.get("finished_at"),
-                "exit_code":   j.get("exit_code"),
-            }
-            for j in recent_done
-        ],
+        "busy": False,
+        "pending_count": pending_count,
     }
 
 
@@ -697,12 +663,13 @@ def _build_result(job: dict) -> dict:
     
     agent_type = job.get("agent_type", "codex")
     
+    prompt = job["prompt"]
     result = {
         "job_id":      job_id,
         "status":      job["status"],
         "exit_code":   job.get("exit_code"),
         "output":      output,
-        "prompt":      job["prompt"],
+        "prompt":      prompt[:200] + "..." if len(prompt) > 200 else prompt,
         "cwd":         job["cwd"],
         "started_at":  job.get("started_at"),
         "finished_at": job.get("finished_at"),
