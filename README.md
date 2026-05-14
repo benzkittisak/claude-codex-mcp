@@ -1,63 +1,130 @@
-# codex-async-mcp
+# agent-async-mcp
 
-Local MCP server that wraps the `codex` CLI asynchronously — returns a `job_id` immediately instead of blocking, so Claude never hits the MCP protocol timeout (`-32001`).
+Local MCP server that runs Codex, Cursor, and Gemini CLI tasks asynchronously — returns a `job_id` immediately instead of blocking, so the orchestrating agent never hits the MCP 60-second timeout.
+
+## How it works
+
+```
+Claude (orchestrator)
+  │
+  ├─ codex_start(prompt, cwd)  →  job_id (instant)
+  │
+  └─ codex_wait(job_id)        →  blocks up to 50 s, returns result
+                                   loop again on timeout
+```
+
+A sequential queue ensures only one agent process runs at a time. Jobs are persisted in SQLite so the queue survives server restarts.
+
+---
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/benzkittisak/claude-codex-mcp/master/install.sh | bash
+```
+
+The installer will:
+- Clone this repo to `~/.local/share/agent-async-mcp/`
+- Create an isolated Python venv
+- Symlink `agent-async` to `~/.local/bin/`
+- Detect Claude Code, Codex, Cursor, Claude Desktop and ask which to register
+
+**Uninstall:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/benzkittisak/claude-codex-mcp/master/install.sh | bash -s uninstall
+# or, if already installed:
+agent-async uninstall
+```
+
+---
+
+## CLI
+
+```bash
+agent-async list-agents              # show detected / registered agents
+agent-async add-agent claude-code    # register with Claude Code CLI
+agent-async add-agent codex          # register with Codex CLI
+agent-async add-agent cursor         # register with Cursor IDE
+agent-async add-agent claude-desktop # register with Claude Desktop
+agent-async remove-agent <agent>     # unregister
+agent-async status                   # open real-time job monitor
+agent-async update                   # pull latest + reinstall
+agent-async check-update             # check without installing
+agent-async enable-auto-update       # schedule daily auto-update (09:00)
+agent-async disable-auto-update      # remove scheduled auto-update
+agent-async uninstall                # remove everything
+```
+
+---
 
 ## Requirements
 
 - Python 3.11+
-- `codex` CLI installed and on `$PATH` (v0.125.0+)
-- Claude Code CLI
+- One or more agent CLIs: `codex`, `cursor`, `gemini` (optional — only needed for the tools you use)
+- Claude Code CLI (recommended orchestrator)
 
 ---
 
-## Installation
+## MCP Tools (13 total)
 
-```bash
-cd ~/payroll-mcp   # or wherever this repo lives
-pip install -e ".[dev]"
-```
+### Codex
 
-Verify:
+| Tool | Description |
+|------|-------------|
+| `codex_start(prompt, cwd, approval_policy?, context_files?)` | Queue a Codex task → returns `job_id` instantly |
+| `codex_wait(job_id, timeout_seconds=50)` | Block until done; loop on `{"status":"timeout"}` |
+| `codex_await_any(timeout_seconds=50)` | Block until ANY queued job completes |
 
-```bash
-python -c "from codex_async_mcp.server import mcp; print(mcp.name)"
-# → codex-async-mcp
-```
+### Cursor
+
+| Tool | Description |
+|------|-------------|
+| `cursor_start(prompt, cwd, approval_policy?, context_files?)` | Queue a Cursor headless task → `job_id` |
+| `cursor_wait(job_id, timeout_seconds=50)` | Block until done |
+
+### Gemini
+
+| Tool | Description |
+|------|-------------|
+| `gemini_start(prompt, cwd, approval_policy?, context_files?)` | Queue a Gemini CLI task → `job_id` |
+| `gemini_wait(job_id, timeout_seconds=50)` | Block until done |
+| `gemini_confluence_start(title, cwd, ...)` | Ask Gemini to draft/publish a Confluence page |
+| `gemini_pr_start(cwd, pr_goal, ...)` | Ask Gemini to draft/publish a PR |
+
+### Shared / Queue
+
+| Tool | Description |
+|------|-------------|
+| `job_list(limit=20)` | List recent jobs (all agents), newest first |
+| `job_cancel(job_id)` | Cancel running or pending job |
+| `queue_status()` | `{"busy": bool, "pending_count": int}` |
+| `agent_notify_done(job_id, summary?)` | Called BY an agent to signal completion |
+
+### `approval_policy` values
+
+| Value | Behavior |
+|-------|----------|
+| `full-auto` | No prompts, no sandbox (use for automation) |
+| `auto-edit` | Auto-applies edits |
+| `suggest` | Read-only — pauses for interactive input (avoid in automation) |
 
 ---
 
-## Register with Claude
+## Permissions (settings.local.json)
 
-### Global (all projects)
-
-```bash
-claude mcp add codex-async -s user -- python -m codex_async_mcp.server
-```
-
-### Project-only
-
-```bash
-cd ~/payrollservice-thailand   # or any project
-claude mcp add codex-async -- python -m codex_async_mcp.server
-```
-
-### Verify
-
-```bash
-claude mcp list
-# codex-async: python -m codex_async_mcp.server - ✓ Connected
-```
-
-### Add tool permissions (settings.local.json)
+Add to your Claude Code project's `.claude/settings.local.json`:
 
 ```json
 {
   "permissions": {
     "allow": [
-      "mcp__codex-async__codex_start",
-      "mcp__codex-async__codex_poll",
-      "mcp__codex-async__codex_list",
-      "mcp__codex-async__codex_cancel"
+      "mcp__agent-async__codex_start",   "mcp__agent-async__codex_wait",
+      "mcp__agent-async__cursor_start",  "mcp__agent-async__cursor_wait",
+      "mcp__agent-async__gemini_start",  "mcp__agent-async__gemini_wait",
+      "mcp__agent-async__queue_status",  "mcp__agent-async__job_list",
+      "mcp__agent-async__job_cancel",    "mcp__agent-async__agent_notify_done",
+      "mcp__agent-async__codex_await_any"
     ]
   }
 }
@@ -65,176 +132,84 @@ claude mcp list
 
 ---
 
-## Register with Cursor IDE
+## Usage pattern
 
-If you want to use this MCP server directly from within the Cursor Editor's AI Chat (Composer):
-
-### Option 1: Via Settings UI
-1. Open Cursor Settings (`Ctrl/Cmd + ,`)
-2. Go to **Features** > **MCP**
-3. Click **+ Add new MCP Server**
-4. Set the following values:
-   - **Type**: `command`
-   - **Name**: `codex-async`
-   - **Command**: `python -m codex_async_mcp.server`
-
-### Option 2: Via `.cursor/mcp.json`
-Create or edit `.cursor/mcp.json` in your project root:
-
-```json
-{
-  "mcpServers": {
-    "codex-async": {
-      "command": "python",
-      "args": ["-m", "codex_async_mcp.server"]
-    }
-  }
-}
-```
-
----
-
-## Tools
-
-| Tool | Description |
-|------|-------------|
-| `codex_start(prompt, cwd, approval_policy?)` | Start codex in background → returns `job_id` instantly |
-| `codex_poll(job_id, tail_lines?)` | Check status + output tail |
-| `codex_list(limit?)` | List recent jobs (newest first) |
-| `codex_cancel(job_id)` | Kill running job |
-
-### approval_policy values
-
-| Value | Codex flag | Behavior |
-|-------|-----------|----------|
-| `suggest` | `-s read-only` | Read-only sandbox, no writes |
-| `auto-edit` | `--full-auto` | Auto-applies edits |
-| `full-auto` | `--dangerously-bypass-approvals-and-sandbox` | No prompts, no sandbox |
-
-**For Claude automation always use `full-auto`** — `suggest` mode waits for interactive input which will never arrive inside a subprocess.
-
-### Example usage
-
-```
-codex_start(
-  prompt="In app/services/prorate_calculation_service.rb line 96, change format(...) to number_to_currency(...)",
-  cwd="/Users/bbgummybear/payrollservice-thailand",
-  approval_policy="full-auto"
+```python
+# Start a job (returns immediately)
+result = codex_start(
+    prompt="In app/services/foo.rb line 42, change X to Y. Do not change anything else.",
+    cwd="/path/to/repo",
+    approval_policy="full-auto"
 )
-# → { job_id: "f3a9b2", status: "running", pid: 12345 }
+job_id = result["job_id"]
 
-codex_poll(job_id="f3a9b2")
-# → { status: "running", output: "Reading file..." }
-
-codex_poll(job_id="f3a9b2")
-# → { status: "done", exit_code: 0, output: "Applied changes to prorate_calculation_service.rb" }
+# Wait in a loop (each call blocks up to 50 s)
+while True:
+    result = codex_wait(job_id, timeout_seconds=50)
+    if result["status"] == "timeout":
+        continue
+    break  # "done" | "error" | "cancelled"
 ```
 
 ---
 
-## Job state
+## Job data
 
-Jobs are stored in `~/.codex-async/jobs/{job_id}/`:
+Jobs are persisted in `~/.agent-async/`:
 
 ```
-~/.codex-async/jobs/f3a9b2/
-  meta.json     ← status, pid, timestamps, exit_code
-  output.txt    ← stdout + stderr from codex
-```
-
-`meta.json` structure:
-
-```json
-{
-  "job_id": "f3a9b2",
-  "status": "running | done | error | cancelled",
-  "prompt": "...",
-  "cwd": "/path/to/repo",
-  "approval_policy": "full-auto",
-  "pid": 12345,
-  "started_at": "2026-04-29T10:00:00+00:00",
-  "finished_at": null,
-  "exit_code": null
-}
+~/.agent-async/
+  queue.db          ← SQLite: job metadata, status, token usage
+  jobs/<job_id>/
+    output.txt      ← stdout + stderr from the agent process
 ```
 
 ---
 
 ## Troubleshooting
 
-### `codex-async: ... - ✗ Failed` in `claude mcp list`
+### `agent-async: command not found`
 
-Python can't be found or the package isn't installed in the right environment.
-
-```bash
-# Check which python Claude is using
-which python
-
-# If using conda, register with the full path
-claude mcp add codex-async -s user -- /Users/bbgummybear/miniconda3/bin/python -m codex_async_mcp.server
-
-# Verify the package is installed in that environment
-/Users/bbgummybear/miniconda3/bin/python -c "import codex_async_mcp; print('ok')"
-```
-
----
-
-### `status: "error"` immediately after `codex_start`
-
-Codex failed to start. Check the raw output:
+`~/.local/bin` not in PATH. Run:
 
 ```bash
-cat ~/.codex-async/jobs/<job_id>/output.txt
+source ~/.zshrc   # or ~/.bashrc
 ```
 
-Common causes:
+Or open a new terminal. The installer adds it automatically.
 
-| Output message | Fix |
-|----------------|-----|
-| `command not found: codex` | `codex` not on PATH — add to shell profile or set `CODEX_BIN` in `config.py` |
-| `unknown flag: --dangerously-bypass-approvals-and-sandbox` | Codex version < 0.125.0 — run `npm install -g @openai/codex` to upgrade |
-| `permission denied` | `cwd` doesn't exist or Claude doesn't have access |
+### `status: "error"` immediately after `*_start`
 
----
-
-### `status: "running"` forever, never finishes
-
-The subprocess is hung (waiting for input or stuck in a loop).
+The agent CLI failed to start. Check output:
 
 ```bash
-# Check if the process is still alive
-ps aux | grep codex
-
-# Check live output
-tail -f ~/.codex-async/jobs/<job_id>/output.txt
-
-# Cancel the job
-codex_cancel(job_id="<job_id>")
+cat ~/.agent-async/jobs/<job_id>/output.txt
 ```
 
-Most common cause: using `approval_policy="suggest"` which pauses for interactive approval. Use `"full-auto"` instead.
+| Message | Fix |
+|---------|-----|
+| `command not found: codex` | Install codex: `npm install -g @openai/codex` |
+| `command not found: gemini` | Install gemini CLI from github.com/google-gemini/gemini-cli |
+| `permission denied` | `cwd` doesn't exist or is inaccessible |
 
----
+### `status: "running"` forever
 
-### Job shows `status: "running"` after server restart
-
-The MCP server lost the in-memory `Popen` registry on restart. The next `codex_poll` call will detect the PID is dead and update the status automatically.
+The subprocess is hung. Most common cause: `approval_policy="suggest"` waiting for interactive input. Always use `"full-auto"` for automation.
 
 ```bash
-codex_poll(job_id="<job_id>")
-# → { status: "done", ... }   ← auto-resolved on first poll
+agent-async status   # open monitor to see live state
 ```
 
----
+Cancel a stuck job:
+
+```python
+job_cancel(job_id="<job_id>")
+```
 
 ### Old jobs filling up disk
 
 ```bash
-# View all jobs sorted by date
-ls -lt ~/.codex-async/jobs/
-
-# Delete jobs older than 7 days
-find ~/.codex-async/jobs -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
+find ~/.agent-async/jobs -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
 ```
 
 ---
@@ -242,21 +217,24 @@ find ~/.codex-async/jobs -maxdepth 1 -type d -mtime +7 -exec rm -rf {} +
 ## Project structure
 
 ```
-codex-async-mcp/
-├── README.md
+agent-async-mcp/
+├── install.sh
+├── mcp-monitor.py
 ├── pyproject.toml
-├── src/
-│   └── codex_async_mcp/
-│       ├── __init__.py
-│       ├── server.py        # MCP entry point, tool definitions
-│       ├── job_manager.py   # spawn / poll / cancel / list
-│       └── config.py        # JOBS_DIR, CODEX_BIN, defaults
-└── tests/
-    └── test_job_manager.py
+└── src/
+    └── agent_async_mcp/
+        ├── server.py       # MCP entry point, tool definitions
+        ├── job_manager.py  # queue, spawn, wait, cancel
+        ├── db.py           # SQLite schema + helpers
+        ├── config.py       # paths, timeouts, agent binaries
+        └── cli.py          # agent-async CLI
 ```
 
-## Run tests
+## Development
 
 ```bash
+git clone https://github.com/benzkittisak/claude-codex-mcp
+cd claude-codex-mcp
+pip install -e ".[dev]"
 pytest tests/ -v
 ```
