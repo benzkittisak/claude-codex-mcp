@@ -357,6 +357,78 @@ detect_agents
 select_agents
 register_agents "${PYTHON}"
 
+# ── smoke test ────────────────────────────────────────────────────────────────
+
+smoke_test() {
+    local cli="${LOCAL_BIN}/codex-async"
+    local pass=0 fail=0
+
+    echo ""
+    info "Running smoke tests..."
+
+    # 1. CLI binary exists and is executable
+    printf "    %-45s" "CLI binary exists"
+    if [[ -x "$cli" ]]; then
+        echo -e "${GREEN}PASS${NC}"; (( pass++ ))
+    else
+        echo -e "${RED}FAIL${NC}"; (( fail++ ))
+        echo "    FIX: ln -sf ${VENV_DIR}/bin/codex-async ${cli}"
+    fi
+
+    # 2. CLI reachable in PATH
+    printf "    %-45s" "codex-async in PATH"
+    if command -v codex-async &>/dev/null; then
+        echo -e "${GREEN}PASS${NC}"; (( pass++ ))
+    else
+        echo -e "${YELLOW}WARN${NC} (need new terminal)"; (( pass++ ))
+        echo "    FIX: source ~/.zshrc  (or open a new terminal)"
+    fi
+
+    # 3. Python import
+    printf "    %-45s" "Python import codex_async_mcp"
+    if "${PYTHON}" -c "import codex_async_mcp" 2>/dev/null; then
+        echo -e "${GREEN}PASS${NC}"; (( pass++ ))
+    else
+        echo -e "${RED}FAIL${NC}"; (( fail++ ))
+        echo "    FIX: ${VENV_DIR}/bin/pip install -e ${INSTALL_DIR}"
+    fi
+
+    # 4. MCP server starts and exits cleanly (1-second timeout)
+    printf "    %-45s" "MCP server starts"
+    if timeout 2s "${PYTHON}" -c "
+from codex_async_mcp.db import init_db
+from codex_async_mcp.job_manager import recover_on_startup
+init_db(); recover_on_startup()
+print('ok')
+" 2>/dev/null | grep -q ok; then
+        echo -e "${GREEN}PASS${NC}"; (( pass++ ))
+    else
+        echo -e "${RED}FAIL${NC}"; (( fail++ ))
+        echo "    FIX: check ${VENV_DIR}/bin/pip install -e ${INSTALL_DIR}"
+        echo "         or re-run the installer"
+    fi
+
+    # 5. At least one agent registered
+    printf "    %-45s" "At least one agent registered"
+    local reg
+    reg=$("$cli" list-agents 2>/dev/null | grep -c "yes" || echo 0)
+    if [[ "$reg" -gt 0 ]]; then
+        echo -e "${GREEN}PASS${NC} (${reg} agent(s))"; (( pass++ ))
+    else
+        echo -e "${YELLOW}WARN${NC} no agents registered"
+        echo "    FIX: codex-async add-agent claude-code"
+    fi
+
+    echo ""
+    if [[ $fail -eq 0 ]]; then
+        ok "All tests passed (${pass}/${pass})."
+    else
+        warn "${fail} test(s) failed — see FIX hints above."
+    fi
+}
+
+smoke_test
+
 # ── done ──────────────────────────────────────────────────────────────────────
 
 echo ""
