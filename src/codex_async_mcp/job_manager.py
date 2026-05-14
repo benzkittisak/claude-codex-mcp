@@ -222,7 +222,12 @@ def _monitor(job_id: str, proc: subprocess.Popen) -> None:
             status = "done" if exit_code == 0 else "error"
             elapsed = time.time() - job_start_time
             logger.info("Job %s finished (status=%s, exit=%d, %.1fs)", job_id, status, exit_code, elapsed)
-            db_update_job(job_id, status=status, exit_code=exit_code, finished_at=now)
+            
+            # Parse token usage from final output
+            raw_output = _read_tail(job_id)
+            tokens_used = _parse_token_usage_from_text(raw_output)
+            
+            db_update_job(job_id, status=status, exit_code=exit_code, finished_at=now, tokens_used=tokens_used)
             with _lock:
                 _active_procs.pop(job_id, None)
                 _try_start_next_locked()    # advance queue before releasing lock
@@ -637,8 +642,13 @@ def notify_job_done(job_id: str, summary: str = "") -> dict:
             pass
 
     now = datetime.now(timezone.utc).isoformat()
-    db_update_job(job_id, status="done", exit_code=0, finished_at=now)
-    logger.info("Job %s notify_done received (summary=%.80s)", job_id, summary)
+    
+    # Parse token usage
+    raw_output = _read_tail(job_id)
+    tokens_used = _parse_token_usage_from_text(raw_output)
+    
+    db_update_job(job_id, status="done", exit_code=0, finished_at=now, tokens_used=tokens_used)
+    logger.info("Job %s notify_done received (summary=%.80s, tokens=%s)", job_id, summary, tokens_used)
 
     # Remove from active procs and start the next queued job.
     with _lock:

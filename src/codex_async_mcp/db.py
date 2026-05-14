@@ -73,13 +73,19 @@ def init_db() -> None:
                     created_at      TEXT NOT NULL,
                     started_at      TEXT,
                     finished_at     TEXT,
-                    agent_type      TEXT NOT NULL DEFAULT 'codex'
+                    agent_type      TEXT NOT NULL DEFAULT 'codex',
+                    tokens_used     INTEGER
                 )
             """)
             
             # Migration for existing databases
             try:
                 conn.execute("ALTER TABLE jobs ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'codex'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            try:
+                conn.execute("ALTER TABLE jobs ADD COLUMN tokens_used INTEGER")
             except sqlite3.OperationalError:
                 pass  # Column already exists
                 
