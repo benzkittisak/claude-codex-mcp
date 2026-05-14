@@ -10,6 +10,15 @@ from pathlib import Path
 
 MCP_NAME = "codex-async"
 PYTHON = sys.executable
+INSTALL_DIR = Path.home() / ".local" / "share" / "codex-async-mcp"
+VENV_DIR = INSTALL_DIR / ".venv"
+VENV_PYTHON = VENV_DIR / "bin" / "python"
+VENV_PIP = VENV_DIR / "bin" / "pip"
+
+# LaunchAgent / cron identifiers
+_LAUNCH_AGENT_ID = "com.codex-async.update"
+_LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{_LAUNCH_AGENT_ID}.plist"
+_CRON_TAG = "# codex-async auto-update"
 
 
 def _mcp_entry(python: str) -> dict:
@@ -102,6 +111,151 @@ AGENTS: dict[str, dict] = {
 }
 
 
+# ── Update ────────────────────────────────────────────────────────────────────
+
+def _resolve_install_dir() -> Path:
+    if not (INSTALL_DIR / ".git").exists():
+        print(f"Install directory not found: {INSTALL_DIR}", file=sys.stderr)
+        print("Run the install script first.", file=sys.stderr)
+        sys.exit(1)
+    return INSTALL_DIR
+
+
+def _resolve_pip() -> Path:
+    pip = VENV_PIP
+    if not pip.exists():
+        print(f"venv pip not found: {pip}", file=sys.stderr)
+        print("Re-run the install script to recreate the venv.", file=sys.stderr)
+        sys.exit(1)
+    return pip
+
+
+def _local_sha(install_dir: Path) -> str:
+    r = subprocess.run(["git", "-C", str(install_dir), "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def _remote_sha(install_dir: Path) -> str:
+    subprocess.run(["git", "-C", str(install_dir), "fetch", "--quiet"],
+                   capture_output=True, timeout=10)
+    r = subprocess.run(["git", "-C", str(install_dir), "rev-parse", "@{u}"],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def cmd_update(check_only: bool = False) -> None:
+    install_dir = _resolve_install_dir()
+
+    print("Checking for updates... ", end="", flush=True)
+    try:
+        local = _local_sha(install_dir)
+        remote = _remote_sha(install_dir)
+    except Exception as e:
+        print(f"could not reach remote: {e}")
+        return
+
+    if local == remote:
+        print("already up to date.")
+        return
+
+    print(f"update available ({local[:7]} → {remote[:7]})")
+
+    if check_only:
+        print("Run 'codex-async update' to apply.")
+        return
+
+    print("Pulling latest... ", end="", flush=True)
+    subprocess.run(["git", "-C", str(install_dir), "pull", "--ff-only", "--quiet"], check=True)
+    print("OK")
+
+    pip = _resolve_pip()
+    print("Reinstalling package... ", end="", flush=True)
+    subprocess.run([str(pip), "install", "--quiet", "-e", str(install_dir)], check=True)
+    print("OK")
+
+    print("Done. Restart your agent to load the new version.")
+
+
+# ── Auto-update ───────────────────────────────────────────────────────────────
+
+def _codex_async_bin() -> str:
+    """Resolved path to this CLI — used in scheduled job commands."""
+    candidate = VENV_DIR / "bin" / "codex-async"
+    return str(candidate) if candidate.exists() else shutil.which("codex-async") or "codex-async"
+
+
+def cmd_enable_auto_update() -> None:
+    cli = _codex_async_bin()
+
+    if sys.platform == "darwin":
+        plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>             <string>{_LAUNCH_AGENT_ID}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{cli}</string>
+        <string>update</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>   <integer>9</integer>
+        <key>Minute</key> <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>  <string>{Path.home()}/.codex-async/update.log</string>
+    <key>StandardErrorPath</key> <string>{Path.home()}/.codex-async/update.log</string>
+    <key>RunAtLoad</key> <false/>
+</dict>
+</plist>
+"""
+        _LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LAUNCH_AGENT_PATH.write_text(plist)
+        subprocess.run(["launchctl", "unload", str(_LAUNCH_AGENT_PATH)], capture_output=True)
+        subprocess.run(["launchctl", "load", str(_LAUNCH_AGENT_PATH)], check=True)
+        print(f"Auto-update enabled (daily 09:00). Log: ~/.codex-async/update.log")
+
+    elif sys.platform.startswith("linux"):
+        cron_line = f"0 9 * * * {cli} update >> ~/.codex-async/update.log 2>&1  {_CRON_TAG}"
+        existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+        if _CRON_TAG in existing:
+            print("Auto-update already enabled.")
+            return
+        new_crontab = existing.rstrip() + "\n" + cron_line + "\n"
+        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
+        print("Auto-update enabled (daily 09:00). Log: ~/.codex-async/update.log")
+
+    else:
+        print("Auto-update not supported on this platform. Run 'codex-async update' manually.",
+              file=sys.stderr)
+
+
+def cmd_disable_auto_update() -> None:
+    if sys.platform == "darwin":
+        if _LAUNCH_AGENT_PATH.exists():
+            subprocess.run(["launchctl", "unload", str(_LAUNCH_AGENT_PATH)], capture_output=True)
+            _LAUNCH_AGENT_PATH.unlink()
+            print("Auto-update disabled.")
+        else:
+            print("Auto-update was not enabled.")
+
+    elif sys.platform.startswith("linux"):
+        existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+        if _CRON_TAG not in existing:
+            print("Auto-update was not enabled.")
+            return
+        new_crontab = "\n".join(
+            line for line in existing.splitlines() if _CRON_TAG not in line
+        ) + "\n"
+        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
+        print("Auto-update disabled.")
+
+    else:
+        print("Auto-update not supported on this platform.", file=sys.stderr)
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 def _print_table() -> None:
@@ -155,6 +309,12 @@ def main() -> None:
 
     sub.add_parser("list-agents", help="Show all detected and registered agents")
 
+    sub.add_parser("update", help="Pull latest version and reinstall")
+    sub.add_parser("check-update", help="Check if an update is available (no install)")
+
+    sub.add_parser("enable-auto-update", help="Schedule daily auto-update (09:00)")
+    sub.add_parser("disable-auto-update", help="Remove scheduled auto-update")
+
     args = parser.parse_args()
 
     if args.command == "add-agent":
@@ -163,6 +323,14 @@ def main() -> None:
         cmd_remove(args.agent)
     elif args.command == "list-agents":
         _print_table()
+    elif args.command == "update":
+        cmd_update()
+    elif args.command == "check-update":
+        cmd_update(check_only=True)
+    elif args.command == "enable-auto-update":
+        cmd_enable_auto_update()
+    elif args.command == "disable-auto-update":
+        cmd_disable_auto_update()
 
 
 if __name__ == "__main__":
