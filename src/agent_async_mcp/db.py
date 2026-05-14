@@ -1,5 +1,5 @@
 """
-SQLite-backed job queue for codex-async-mcp.
+SQLite-backed job queue for agent-async-mcp.
 
 Schema (queue.db / jobs table):
   job_id          TEXT PK

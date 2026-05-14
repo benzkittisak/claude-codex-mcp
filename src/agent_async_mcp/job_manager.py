@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-logger = logging.getLogger("codex-async-mcp")
+logger = logging.getLogger("agent-async-mcp")
 
 from .config import (
     CODEX_BIN,
