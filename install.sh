@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# codex-async-mcp installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/benzkittisak/claude-codex-mcp/master/install.sh | bash
+# codex-async-mcp installer / uninstaller
+# Install:   curl -fsSL https://raw.githubusercontent.com/benzkittisak/claude-codex-mcp/master/install.sh | bash
+# Uninstall: curl -fsSL https://raw.githubusercontent.com/benzkittisak/claude-codex-mcp/master/install.sh | bash -s uninstall
+#            or: bash install.sh uninstall
 
 set -euo pipefail
 
 REPO_URL="https://github.com/benzkittisak/claude-codex-mcp"
 INSTALL_DIR="${HOME}/.local/share/codex-async-mcp"
+LOCAL_BIN="${HOME}/.local/bin"
+VENV_DIR="${INSTALL_DIR}/.venv"
+MCP_NAME="codex-async"
 
 # ── colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'
@@ -14,6 +19,65 @@ info()  { echo -e "${BLUE}[codex-async]${NC} $*"; }
 ok()    { echo -e "${GREEN}[codex-async]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[codex-async]${NC} $*"; }
 die()   { echo -e "${RED}[codex-async] ERROR:${NC} $*" >&2; exit 1; }
+
+# ── uninstall ─────────────────────────────────────────────────────────────────
+
+uninstall() {
+    echo ""
+    echo -e "${BOLD}codex-async-mcp uninstaller${NC}"
+    echo "────────────────────────────────────────"
+    echo ""
+
+    # Remove from all agents via CLI (best-effort)
+    CLI="${LOCAL_BIN}/${MCP_NAME}"
+    if [[ -x "$CLI" ]]; then
+        info "Removing agent registrations..."
+        for agent in claude-code codex cursor claude-desktop; do
+            "$CLI" remove-agent "$agent" 2>/dev/null && ok "  removed: $agent" || true
+        done
+    else
+        warn "CLI not found — skipping agent deregistration."
+        warn "Run manually: claude mcp remove ${MCP_NAME} -s user"
+    fi
+
+    # Remove CLI symlink
+    if [[ -L "${LOCAL_BIN}/${MCP_NAME}" ]]; then
+        rm "${LOCAL_BIN}/${MCP_NAME}"
+        ok "Removed symlink: ${LOCAL_BIN}/${MCP_NAME}"
+    fi
+
+    # Remove install directory (repo + venv)
+    if [[ -d "${INSTALL_DIR}" ]]; then
+        rm -rf "${INSTALL_DIR}"
+        ok "Removed: ${INSTALL_DIR}"
+    fi
+
+    # Remove data directory
+    DATA_DIR="${HOME}/.codex-async"
+    if [[ -d "${DATA_DIR}" ]]; then
+        printf "Remove job data at %s? [y/n]: " "${DATA_DIR}"
+        read -r ans </dev/tty
+        if [[ "$ans" == "y" || "$ans" == "Y" ]]; then
+            rm -rf "${DATA_DIR}"
+            ok "Removed: ${DATA_DIR}"
+        else
+            warn "Kept: ${DATA_DIR}"
+        fi
+    fi
+
+    # Remove LaunchAgent (macOS)
+    LAUNCH_AGENT="${HOME}/Library/LaunchAgents/com.codex-async.update.plist"
+    if [[ -f "${LAUNCH_AGENT}" ]]; then
+        launchctl unload "${LAUNCH_AGENT}" 2>/dev/null || true
+        rm "${LAUNCH_AGENT}"
+        ok "Removed LaunchAgent auto-update."
+    fi
+
+    echo ""
+    echo "────────────────────────────────────────"
+    ok "Uninstall complete."
+    echo ""
+}
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -102,6 +166,8 @@ register_agents() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
+[[ "${1:-}" == "uninstall" ]] && uninstall && exit 0
+
 echo ""
 echo -e "${BOLD}codex-async-mcp installer${NC}"
 echo "────────────────────────────────────────"
@@ -117,8 +183,6 @@ if [[ -d "${INSTALL_DIR}/.git" ]]; then
 else
     git clone "${REPO_URL}" "${INSTALL_DIR}"
 fi
-
-VENV_DIR="${INSTALL_DIR}/.venv"
 
 info "Creating virtual environment..."
 "${PYTHON}" -m venv "${VENV_DIR}"
@@ -136,7 +200,6 @@ ok "Package installed."
 
 # ── symlink CLI to ~/.local/bin ───────────────────────────────────────────────
 
-LOCAL_BIN="${HOME}/.local/bin"
 mkdir -p "${LOCAL_BIN}"
 ln -sf "${VENV_DIR}/bin/codex-async" "${LOCAL_BIN}/codex-async"
 ok "CLI linked → ${LOCAL_BIN}/codex-async"
