@@ -118,10 +118,16 @@ else
     git clone "${REPO_URL}" "${INSTALL_DIR}"
 fi
 
+VENV_DIR="${INSTALL_DIR}/.venv"
+
 info "Installing package..."
 if command -v uv &>/dev/null; then
-    uv pip install --system -e "${INSTALL_DIR}"
+    uv venv --python "${PYTHON}" "${VENV_DIR}" --quiet
+    uv pip install --python "${VENV_DIR}/bin/python" -e "${INSTALL_DIR}" --quiet
+    PYTHON="${VENV_DIR}/bin/python"
 else
+    "${PYTHON}" -m venv "${VENV_DIR}"
+    PYTHON="${VENV_DIR}/bin/python"
     "${PYTHON}" -m pip install --quiet -e "${INSTALL_DIR}"
 fi
 ok "Package installed."
